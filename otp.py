@@ -39,7 +39,7 @@ from telegram.ext import (
 # ============================================================
 # CONFIG
 # ============================================================
-BOT_TOKEN = "BOT_TOKEN"
+BOT_TOKEN = "8886070850:AAFHecwhCULwkx31ZKZ1WHdFAWWHlZJyu60"
 ADMIN_IDS = [8645142724]
 
 logging.basicConfig(
@@ -83,8 +83,11 @@ REFERRAL_DB_FILE = os.getenv("REFERRAL_DB_FILE", "referrals.json")
 ACCESS_CHECK_INTERVAL = 30
 
 DEFAULT_CHANNELS = [
-    {"id": "" }
-    ]
+    {"id": "@axxuloots", "label": "@axxuloots", "url": "https://t.me/axxuloots"},
+    {"id": "@KALUASC", "label": "@KALUASC", "url": "https://t.me/KALUASC"},
+    {"id": "@X00MTSxKIDS", "label": "@X00MTSxKIDS", "url": "https://t.me/X00MTSxKIDS"},
+    {"id": "@vishalxupdate", "label": "@vishalxupdate", "url": "https://t.me/vishalxupdate"},
+]
 
 # ⚡ NEW: Firebase URL extractor — aas-paas ka text ignore karega
 FIREBASE_URL_REGEX = re.compile(
@@ -2486,7 +2489,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _admin_only(uid):
         await q.answer("Admin only.", show_alert=True)
         return
-    await q.answer().
+    await q.answer()
     data = q.data
 
     if not (data == "admin_manage_fb"
