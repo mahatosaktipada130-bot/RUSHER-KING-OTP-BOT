@@ -39,7 +39,7 @@ from telegram.ext import (
 # ============================================================
 # CONFIG
 # ============================================================
-BOT_TOKEN = "BOT_TOKEN"
+BOT_TOKEN = "8858051706:AAHKkENj8tl5a7W9H5vUNbi7wcCKDxuSdCM"
 ADMIN_IDS = [8645142724]
 
 logging.basicConfig(
