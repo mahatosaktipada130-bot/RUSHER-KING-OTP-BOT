@@ -2033,7 +2033,7 @@ async def _admin_show_firebases(q):
     await q.edit_message_text(text, parse_mode="Markdown",
                               reply_markup=admin_firebases_kb())
     await _start_admin_panel_live_task(
-        q.bot, q.from_user.id, q.message.chat_id, q.message.message_id)
+        context.bot, q.from_user.id, q.message.chat_id, q.message.message_id)
 
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
